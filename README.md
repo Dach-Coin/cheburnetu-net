@@ -93,6 +93,8 @@ icacls "creds\server_key" /inheritance:r /grant:r "$env:USERNAME:(R)"
 
 # 5. Подключиться по ключу
 ssh -i creds/server_key -p 59222 root@<IP_СЕРВЕРА>
+
+> **Примечание:** При первом подключении SSH спросит подтверждение ключа — введите `yes` для добавления ключа в known_hosts. Если ранее был доступ к серверу по другому порту/ключу — удалите старые записи: `ssh-keygen -R <IP>`.
 ```
 
 ## Что делает setup.sh
