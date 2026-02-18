@@ -1,0 +1,1 @@
+# This directory is intended for storing confidential server access information—keys, passwords, connections.
