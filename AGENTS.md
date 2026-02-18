@@ -2,6 +2,24 @@
 
 Этот файл содержит инструкции для AI-ассистента (Claude, ChatGPT, Cursor, Kilo и др.) по развёртыванию VPN-сервера с помощью скрипта `setup.sh`.
 
+## Готовые deploy-скрипты
+
+В проекте есть готовые Python-скрипты, которые выполняют весь деплой автоматически:
+
+- **`deploy_phase1.py`** — подключается к серверу, загружает `setup.sh`, запускает его с потоковым выводом, скачивает SSH-ключ и credentials в `creds/`
+- **`deploy_verify.py`** — проверяет подключение по ключу на новом порту, статус Docker-контейнеров, портов и UFW
+
+Оба скрипта читают данные сервера из **`deploy_config.ini`** (не коммитится, в `.gitignore`). Шаблон — `deploy_config.example.ini`.
+
+### Порядок использования deploy-скриптов:
+
+1. Скопировать `deploy_config.example.ini` → `deploy_config.ini`, заполнить IP/пароль
+2. `python deploy_phase1.py` — полный деплой (5-15 минут)
+3. Установить права на ключ (`icacls` на Windows / `chmod 600` на Linux)
+4. `python deploy_verify.py` — проверка
+
+### Если нужно делать деплой вручную (без скриптов):
+
 ## Общий план действий
 
 1. Подключиться к серверу по SSH (порт 22, пароль)
@@ -11,6 +29,23 @@
 5. Сохранить ключ и credentials локально в `creds/`
 6. Установить права на файл ключа
 7. Проверить подключение по ключу на новом порту
+
+## Конфигурация
+
+Данные сервера хранятся в `deploy_config.ini` (формат INI, шаблон — `deploy_config.example.ini`):
+
+```ini
+[server]
+ip = 203.0.113.42
+ssh_port = 22
+username = root
+password = YourPasswordHere
+
+[ssh]
+new_port = 59222
+```
+
+**ВАЖНО:** `deploy_config.ini` содержит пароль сервера и добавлен в `.gitignore`. Не коммитить!
 
 ## Подключение к серверу (paramiko)
 
@@ -25,6 +60,16 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 Без этого вывод команд `apt` и других утилит упадёт с ошибкой кодировки cp1251 на Windows.
 
+### Чтение конфигурации:
+
+```python
+import configparser
+config = configparser.ConfigParser()
+config.read('deploy_config.ini', encoding='utf-8')
+SERVER_IP = config.get('server', 'ip')
+PASSWORD = config.get('server', 'password')
+```
+
 ### Подключение с паролем (первое подключение):
 
 ```python
@@ -32,7 +77,7 @@ import paramiko
 
 ssh = paramiko.SSHClient()
 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-ssh.connect('IP_АДРЕС', port=22, username='root', password='ПАРОЛЬ', timeout=15)
+ssh.connect(SERVER_IP, port=22, username='root', password=PASSWORD, timeout=15)
 ```
 
 ### Подключение с ключом (после настройки SSH):
@@ -40,12 +85,12 @@ ssh.connect('IP_АДРЕС', port=22, username='root', password='ПАРОЛЬ', 
 ```python
 import paramiko, io
 
-key_str = """-----BEGIN OPENSSH PRIVATE KEY-----
-...содержимое ключа...
------END OPENSSH PRIVATE KEY-----"""
+key_path = 'creds/server_key'
+with open(key_path, 'r') as f:
+    key_str = f.read()
 
 pkey = paramiko.Ed25519Key.from_private_key(io.StringIO(key_str))
-ssh.connect('IP_АДРЕС', port=59222, username='root', pkey=pkey, timeout=15)
+ssh.connect(SERVER_IP, port=59222, username='root', pkey=pkey, timeout=15)
 ```
 
 ## Загрузка и запуск setup.sh

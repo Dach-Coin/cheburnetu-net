@@ -3,3 +3,4 @@ tools/Hysteria2_VPN/gui_config.json
 
 # Секреты — НЕ коммитить!
 creds/
+deploy_config.ini

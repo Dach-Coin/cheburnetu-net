@@ -41,42 +41,57 @@
 
 ## Быстрый старт
 
-### 1. Подключиться к серверу
+### Способ A — автоматически через Python-скрипты (рекомендуется)
+
+Скрипты сами подключатся к серверу, загрузят `setup.sh`, выполнят его и скачают все ключи/credentials.
 
 ```bash
-ssh root@<IP_СЕРВЕРА>
-```
+# 1. Установить зависимость
+pip install paramiko
 
-### 2. Скачать и запустить скрипт
+# 2. Создать конфиг с данными сервера
+cp deploy_config.example.ini deploy_config.ini
+# Заполнить ip, password и т.д. в deploy_config.ini
 
-```bash
-curl -O https://raw.githubusercontent.com/<OWNER>/<REPO>/main/setup.sh
-bash setup.sh
-```
+# 3. Запустить деплой (5-15 минут)
+python deploy_phase1.py
 
-### 3. Сохранить данные доступа
-
-Скрипт выведет:
-- **SSH-ключ** — сохранить в файл `creds/server_key`
-- **Пароль панели 3x-ui** — для управления VLESS/Trojan
-- **Пароли Hysteria2** — для двух пользователей
-- **Ссылка MTProto** — вставить прямо в Telegram
-
-Все данные также сохраняются на сервере в `/root/vpn_credentials.txt`.
-
-### 4. Установить права на SSH-ключ
-
-```bash
+# 4. Установить права на SSH-ключ
 # Linux / macOS:
 chmod 600 creds/server_key
-
 # Windows (PowerShell):
 icacls "creds\server_key" /inheritance:r /grant:r "$env:USERNAME:(R)"
+
+# 5. Проверить, что всё работает
+python deploy_verify.py
 ```
 
-### 5. Подключиться по ключу
+После завершения в `creds/` появятся:
+- `server_key` — SSH-ключ для подключения
+- `credentials.txt` — все пароли и ссылки
+
+### Способ B — вручную на сервере
 
 ```bash
+# 1. Подключиться к серверу
+ssh root@<IP_СЕРВЕРА>
+
+# 2. Скачать и запустить скрипт
+curl -O https://raw.githubusercontent.com/<OWNER>/<REPO>/main/setup.sh
+bash setup.sh
+
+# 3. Сохранить данные доступа из вывода скрипта:
+#    - SSH-ключ → creds/server_key
+#    - Credentials → creds/credentials.txt
+#    Все данные также на сервере в /root/vpn_credentials.txt
+
+# 4. Установить права на SSH-ключ
+# Linux / macOS:
+chmod 600 creds/server_key
+# Windows (PowerShell):
+icacls "creds\server_key" /inheritance:r /grant:r "$env:USERNAME:(R)"
+
+# 5. Подключиться по ключу
 ssh -i creds/server_key -p 59222 root@<IP_СЕРВЕРА>
 ```
 
@@ -113,9 +128,14 @@ HY2_USER2="User2"      # Имя пользователя Hysteria2
 ## Структура проекта
 
 ```
-├── setup.sh                  — Основной скрипт автонастройки
-├── SETUP_GUIDE.md            — Пошаговый гайд (ручная установка)
-├── templates/                — Шаблоны конфигов (без секретов)
+├── setup.sh                      — Основной скрипт автонастройки (выполняется на сервере)
+├── deploy_phase1.py              — Python-скрипт: деплой setup.sh на сервер + скачивание ключей
+├── deploy_verify.py              — Python-скрипт: проверка сервера после деплоя
+├── deploy_config.example.ini     — Шаблон конфигурации (скопировать в deploy_config.ini)
+├── deploy_config.ini             — Ваш конфиг с IP/паролем сервера (в .gitignore)
+├── SETUP_GUIDE.md                — Пошаговый гайд (ручная установка)
+├── AGENTS.md                     — Инструкции для AI-ассистентов
+├── templates/                    — Шаблоны конфигов (без секретов)
 │   ├── sshd_config
 │   ├── ssh_socket_override.conf
 │   ├── jail.local
@@ -126,7 +146,7 @@ HY2_USER2="User2"      # Имя пользователя Hysteria2
 │   ├── 99-bbr.conf
 │   ├── 20auto-upgrades
 │   └── 50unattended-upgrades
-└── creds/                    — Ваши данные доступа (в .gitignore)
+└── creds/                        — Ваши данные доступа (в .gitignore)
     ├── server_key
     └── credentials.txt
 ```
