@@ -1,0 +1,5 @@
+tools/Hysteria2_VPN/__pycache__
+tools/Hysteria2_VPN/gui_config.json
+
+# Секреты — НЕ коммитить!
+creds/

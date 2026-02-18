@@ -1,0 +1,17 @@
+listen: :443
+
+tls:
+  cert: /etc/hysteria/cert.pem
+  key: /etc/hysteria/private.key
+
+auth:
+  type: userpass
+  userpass:
+    User1: <GENERATE: openssl rand -hex 16>
+    User2: <GENERATE: openssl rand -hex 16>
+
+masquerade:
+  type: proxy
+  proxy:
+    url: https://www.apple.com
+    rewriteHost: true
