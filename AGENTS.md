@@ -198,10 +198,16 @@ ssh.connect('IP', port=59222, username='root', pkey=pkey, timeout=15)
 # Проверка сервисов
 _, out, _ = ssh.exec_command('docker ps --format "{{.Names}}: {{.Status}}"')
 print(out.read().decode())
-# Ожидаемый вывод: 3x-ui, hysteria2, mtg — все Up
+# Ожидаемый вывод: 3x-ui, mtg — все Up
+# Hysteria2 управляется через h-ui (systemd), а не Docker
+
+# Проверка h-ui + Hysteria2
+_, out, _ = ssh.exec_command('systemctl is-active h-ui && ss -ulnp | grep :443')
+print(out.read().decode())
+# Ожидаемый вывод: active + hysteria-linux на 443/UDP
 
 # Проверка портов
-_, out, _ = ssh.exec_command('ss -tlnp | grep -E ":(59222|2053|443|8443|993) "')
+_, out, _ = ssh.exec_command('ss -tlnp | grep -E ":(59222|2053|7391|443|8443|993) "')
 print(out.read().decode())
 ```
 
@@ -245,7 +251,7 @@ creds = creds.replace('IPv6_АДРЕС', 'РЕАЛЬНЫЙ_IPv4')
 Скрипт может работать 5-15 минут. Не прерывать! Основное время уходит на:
 - `apt update && apt upgrade` — 1-3 мин
 - `curl -fsSL https://get.docker.com | sh` — 1-2 мин
-- Скачивание Docker-образов (3x-ui ~60MB, hysteria2 ~15MB, mtg ~10MB) — 1-5 мин
+- Скачивание Docker-образов (3x-ui ~60MB, mtg ~10MB) + h-ui бинарник (~20MB) — 1-5 мин
 
 ## Двухфазное подключение
 

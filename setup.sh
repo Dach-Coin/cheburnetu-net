@@ -6,7 +6,7 @@
 # Протоколы:
 #   - VLESS + TCP + TLS (порт 443/TCP)   через 3x-ui / Xray
 #   - Trojan + TCP + TLS (порт 8443/TCP) через 3x-ui / Xray
-#   - Hysteria2 QUIC    (порт 443/UDP)   отдельный Docker-контейнер
+#   - Hysteria2 QUIC    (порт 443/UDP)   h-ui панель + systemd
 #   - MTProto Telegram  (порт 993/TCP)   mtg v2, Docker-контейнер
 #
 # Требования:
@@ -27,6 +27,7 @@ set -euo pipefail
 
 SSH_PORT=59222          # Новый порт SSH
 PANEL_PORT=2053         # Порт веб-панели 3x-ui
+HUI_PORT=7391           # Порт веб-панели h-ui (Hysteria2)
 XUI_VERSION="2.5.7"     # Версия образа 3x-ui
 HY2_USER1="User1"       # Имя первого пользователя Hysteria2
 HY2_USER2="User2"       # Имя второго пользователя Hysteria2
@@ -202,6 +203,7 @@ step5_ufw() {
     ufw allow "${PANEL_PORT}/tcp" comment '3x-ui panel'
     ufw allow '443/tcp'          comment 'VLESS TLS'
     ufw allow '443/udp'          comment 'Hysteria2 QUIC'
+    ufw allow "${HUI_PORT}/tcp"  comment 'h-ui panel (Hysteria2)'
     ufw allow '8443/tcp'         comment 'Trojan TLS'
     ufw allow '993/tcp'          comment 'MTProto proxy (Telegram)'
     echo 'y' | ufw enable
@@ -371,59 +373,97 @@ step9_inbounds() {
     ok "Inbounds: VLESS (443) + Trojan (8443)"
 }
 
-# ===================== ШАГ 10: Hysteria2 ====================================
+# ===================== ШАГ 10: Hysteria2 (h-ui) ==============================
 
 step10_hysteria2() {
-    info "Шаг 10/11: Hysteria2 (443/UDP)"
+    info "Шаг 10/11: Hysteria2 через h-ui панель (443/UDP, панель ${HUI_PORT}/TCP)"
 
     [[ -z "${HY2_PASS1}" ]] && HY2_PASS1=$(gen_pass)
     [[ -z "${HY2_PASS2}" ]] && HY2_PASS2=$(gen_pass)
 
-    mkdir -p /root/hysteria2
+    # Скачать h-ui
+    mkdir -p /usr/local/h-ui/
+    curl -fsSL https://github.com/jonssonyan/h-ui/releases/latest/download/h-ui-linux-amd64 \
+        -o /usr/local/h-ui/h-ui
+    chmod +x /usr/local/h-ui/h-ui
 
-    cat > /root/hysteria2/config.yaml << EOF
-listen: :443
+    # Systemd unit
+    cat > /etc/systemd/system/h-ui.service << EOF
+[Unit]
+Description=h-ui Service
+After=network.target
+Wants=network.target
 
+[Service]
+Type=simple
+WorkingDirectory=/usr/local/h-ui/
+ExecStart=/usr/local/h-ui/h-ui -p ${HUI_PORT}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload && systemctl enable h-ui && systemctl restart h-ui
+
+    # Ждём пока h-ui стартует и создаст БД
+    wait_for "h-ui панель" 15 "curl -sk -o /dev/null -w '%{http_code}' http://localhost:${HUI_PORT}/ | grep -q 200" \
+        || warn "h-ui: панель не отвечает на порту ${HUI_PORT}"
+
+    # Настроить HTTPS (использует сертификат от 3x-ui)
+    sqlite3 /usr/local/h-ui/data/h_ui.db \
+        "UPDATE config SET value='/root/3x-ui/cert/cert.pem' WHERE key='H_UI_CRT_PATH';"
+    sqlite3 /usr/local/h-ui/data/h_ui.db \
+        "UPDATE config SET value='/root/3x-ui/cert/private.key' WHERE key='H_UI_KEY_PATH';"
+
+    # Настроить Hysteria2 конфиг
+    local JWT_SECRET
+    JWT_SECRET=$(sqlite3 /usr/local/h-ui/data/h_ui.db "SELECT value FROM config WHERE key='JWT_SECRET';")
+
+    python3 -c "
+import sqlite3, hashlib
+conn = sqlite3.connect('/usr/local/h-ui/data/h_ui.db')
+
+# Hysteria2 server config (YAML stored as string)
+config = '''listen: \":443\"
 tls:
-  cert: /etc/hysteria/cert.pem
-  key: /etc/hysteria/private.key
-
+  cert: /root/3x-ui/cert/cert.pem
+  key: /root/3x-ui/cert/private.key
 auth:
-  type: userpass
-  userpass:
-    ${HY2_USER1}: ${HY2_PASS1}
-    ${HY2_USER2}: ${HY2_PASS2}
-
+  type: http
+  http:
+    url: https://127.0.0.1:${HUI_PORT}/hui/hysteria2/auth
+    insecure: true
+trafficStats:
+  listen: \":7653\"
+  secret: ${JWT_SECRET}
 masquerade:
   type: proxy
   proxy:
     url: https://www.apple.com
-    rewriteHost: true
-EOF
+    rewriteHost: true'''
+conn.execute('UPDATE config SET value=? WHERE key=?', (config, 'HYSTERIA2_CONFIG'))
+conn.execute('UPDATE config SET value=? WHERE key=?', ('1', 'HYSTERIA2_ENABLE'))
 
-    cat > /root/hysteria2/docker-compose.yml << 'EOF'
-services:
-  hysteria2:
-    image: tobyxdd/hysteria:v2
-    container_name: hysteria2
-    restart: always
-    network_mode: host
-    volumes:
-      - ./config.yaml:/etc/hysteria/config.yaml
-      - /root/3x-ui/cert/cert.pem:/etc/hysteria/cert.pem:ro
-      - /root/3x-ui/cert/private.key:/etc/hysteria/private.key:ro
-    command: ["server", "-c", "/etc/hysteria/config.yaml"]
-EOF
+# Add user accounts (con_pass = username.password, pass = SHA-224 hash)
+for user, pwd in [('${HY2_USER1}', '${HY2_PASS1}'), ('${HY2_USER2}', '${HY2_PASS2}')]:
+    h = hashlib.sha224(pwd.encode()).hexdigest()
+    con_pass = f'{user}.{pwd}'
+    conn.execute('''INSERT INTO account (username, pass, con_pass, quota, download, upload,
+        expire_time, kick_util_time, device_no, role, deleted)
+        VALUES (?, ?, ?, -1, 0, 0, 253370736000000, 0, 3, 'user', 0)''', (user, h, con_pass))
 
-    cd /root/hysteria2
-    docker compose pull
-    docker compose up -d
+conn.commit()
+conn.close()
+"
+
+    # Перезапустить для применения всех настроек
+    systemctl restart h-ui
 
     # Ждём пока Hysteria2 поднимет 443/UDP (до 30 сек)
     wait_for "Hysteria2 порт 443/udp" 30 "ss -ulnp | grep -q ':443 '" \
-        || warn "Hysteria2: порт 443/UDP не слушает (проверь: docker logs hysteria2)"
+        || warn "Hysteria2: порт 443/UDP не слушает (проверь: journalctl -u h-ui)"
 
-    ok "Hysteria2 запущен"
+    ok "h-ui + Hysteria2 запущены"
 }
 
 # ===================== ШАГ 11: MTProto proxy =================================
@@ -485,9 +525,11 @@ print_summary() {
     echo "  Пароль:  ${PANEL_PASSWORD}"
     echo ""
 
-    echo -e "${BOLD}── Hysteria2 ────────────────────────────────────────────────${NC}"
-    echo "  URI ${HY2_USER1}: hysteria2://${HY2_USER1}:${HY2_PASS1}@${SERVER_IP}:443?insecure=1#hy2-${HY2_USER1}"
-    echo "  URI ${HY2_USER2}: hysteria2://${HY2_USER2}:${HY2_PASS2}@${SERVER_IP}:443?insecure=1#hy2-${HY2_USER2}"
+    echo -e "${BOLD}── h-ui (Hysteria2) ─────────────────────────────────────────${NC}"
+    echo "  Панель: https://${SERVER_IP}:${HUI_PORT}"
+    echo "  Логин:  sysadmin / sysadmin  (сменить после первого входа!)"
+    echo "  URI ${HY2_USER1}: hysteria2://${HY2_USER1}.${HY2_PASS1}@${SERVER_IP}:443/?insecure=1#hy2-${HY2_USER1}"
+    echo "  URI ${HY2_USER2}: hysteria2://${HY2_USER2}.${HY2_PASS2}@${SERVER_IP}:443/?insecure=1#hy2-${HY2_USER2}"
     echo ""
 
     echo -e "${BOLD}── MTProto (Telegram) ───────────────────────────────────────${NC}"
@@ -499,7 +541,7 @@ print_summary() {
     echo ""
 
     echo -e "${BOLD}── Порты ────────────────────────────────────────────────────${NC}"
-    ss -tlnp | grep -E ":(${SSH_PORT}|${PANEL_PORT}|443|8443|993) " \
+    ss -tlnp | grep -E ":(${SSH_PORT}|${PANEL_PORT}|${HUI_PORT}|443|8443|993) " \
         | awk '{print "  TCP " $4}' | sort -u
     ss -ulnp | grep ':443 ' | awk '{print "  UDP " $4}' | sort -u
     echo ""
@@ -519,9 +561,12 @@ URL=https://${SERVER_IP}:${PANEL_PORT}${BASE_PATH}
 USER=admin
 PASS=${PANEL_PASSWORD}
 
-[Hysteria2]
-URI_${HY2_USER1}=hysteria2://${HY2_USER1}:${HY2_PASS1}@${SERVER_IP}:443?insecure=1#hy2-${HY2_USER1}
-URI_${HY2_USER2}=hysteria2://${HY2_USER2}:${HY2_PASS2}@${SERVER_IP}:443?insecure=1#hy2-${HY2_USER2}
+[h-ui (Hysteria2)]
+PANEL=https://${SERVER_IP}:${HUI_PORT}
+PANEL_USER=sysadmin
+PANEL_PASS=sysadmin
+URI_${HY2_USER1}=hysteria2://${HY2_USER1}.${HY2_PASS1}@${SERVER_IP}:443/?insecure=1#hy2-${HY2_USER1}
+URI_${HY2_USER2}=hysteria2://${HY2_USER2}.${HY2_PASS2}@${SERVER_IP}:443/?insecure=1#hy2-${HY2_USER2}
 
 [MTProto]
 LINK=https://t.me/proxy?server=${SERVER_IP}&port=993&secret=${MTG_SECRET}

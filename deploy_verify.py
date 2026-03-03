@@ -46,9 +46,15 @@ print("\n[2] Docker services:")
 _, out, _ = ssh.exec_command('docker ps --format "  {{.Names}}: {{.Status}}"')
 print(out.read().decode('utf-8', errors='replace'))
 
+# Check h-ui (systemd)
+print("[2b] h-ui (Hysteria2) service:")
+_, out, _ = ssh.exec_command('systemctl is-active h-ui')
+status = out.read().decode('utf-8', errors='replace').strip()
+print(f"  h-ui: {status}")
+
 # Check ports
-print("[3] Listening ports:")
-_, out, _ = ssh.exec_command('ss -tlnp | grep -E ":(59222|2053|443|8443|993) "')
+print("\n[3] Listening ports:")
+_, out, _ = ssh.exec_command('ss -tlnp | grep -E ":(59222|2053|443|8443|993|7391) "')
 print(out.read().decode('utf-8', errors='replace'))
 
 _, out, _ = ssh.exec_command('ss -ulnp | grep ":443 "')

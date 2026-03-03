@@ -47,7 +47,7 @@ pip install paramiko
 
 1. **VLESS + TCP + TLS** — порт 443/TCP (через 3x-ui/Xray)
 2. **Trojan + TCP + TLS** — порт 8443/TCP (через 3x-ui/Xray)
-3. **Hysteria2 (QUIC)** — порт 443/UDP (отдельный Docker-контейнер)
+3. **Hysteria2 (QUIC)** — порт 443/UDP (h-ui панель + systemd)
 4. **MTProto proxy (Telegram)** — порт 993/TCP (mtg v2, отдельный Docker-контейнер)
 
 **Не работают на данной сети (блокируются DPI):**
@@ -181,6 +181,7 @@ ufw allow 59222/tcp comment 'SSH'
 ufw allow 2053/tcp comment '3x-ui panel'
 ufw allow 443/tcp comment 'VLESS TLS'
 ufw allow 443/udp comment 'Hysteria2 QUIC'
+ufw allow 7391/tcp comment 'h-ui panel (Hysteria2)'
 ufw allow 8443/tcp comment 'Trojan TLS'
 ufw allow 993/tcp comment 'MTProto proxy (Telegram)'
 echo 'y' | ufw enable
@@ -358,71 +359,97 @@ docker restart 3x-ui
 
 ---
 
-### 10. Установить Hysteria2 (отдельный контейнер)
+### 10. Установить Hysteria2 (h-ui панель)
+
+h-ui — веб-панель для управления Hysteria2 с UI для пользователей, трафика и подписок.
 
 ```bash
-mkdir -p /root/hysteria2
+# Скачать h-ui
+mkdir -p /usr/local/h-ui/
+curl -fsSL https://github.com/jonssonyan/h-ui/releases/latest/download/h-ui-linux-amd64 \
+  -o /usr/local/h-ui/h-ui
+chmod +x /usr/local/h-ui/h-ui
 
-# Сгенерить пароли для пользователей
-PASS1=$(openssl rand -hex 16)
-PASS2=$(openssl rand -hex 16)
-echo "User1 password: $PASS1"
-echo "User2 password: $PASS2"
+# Скачать systemd unit и установить порт
+curl -fsSL https://raw.githubusercontent.com/jonssonyan/h-ui/main/h-ui.service \
+  -o /etc/systemd/system/h-ui.service
+sed -i 's|ExecStart=/usr/local/h-ui/h-ui|ExecStart=/usr/local/h-ui/h-ui -p 7391|' \
+  /etc/systemd/system/h-ui.service
+
+# Запустить
+systemctl daemon-reload && systemctl enable h-ui && systemctl restart h-ui
+sleep 3
 ```
 
-**Конфиг Hysteria2:**
+**Настроить HTTPS для панели (через SQLite):**
 
-```yaml
-listen: :443
+```bash
+# Включить HTTPS (использует тот же сертификат что и 3x-ui)
+sqlite3 /usr/local/h-ui/data/h_ui.db \
+  "UPDATE config SET value='/root/3x-ui/cert/cert.pem' WHERE key='H_UI_CRT_PATH';"
+sqlite3 /usr/local/h-ui/data/h_ui.db \
+  "UPDATE config SET value='/root/3x-ui/cert/private.key' WHERE key='H_UI_KEY_PATH';"
+```
 
+**Настроить Hysteria2 через SQLite:**
+
+```bash
+JWT_SECRET=$(sqlite3 /usr/local/h-ui/data/h_ui.db "SELECT value FROM config WHERE key='JWT_SECRET';")
+
+python3 -c "
+import sqlite3
+config = '''listen: \":443\"
 tls:
-  cert: /etc/hysteria/cert.pem
-  key: /etc/hysteria/private.key
-
+  cert: /root/3x-ui/cert/cert.pem
+  key: /root/3x-ui/cert/private.key
 auth:
-  type: userpass
-  userpass:
-    User1: $PASS1
-    User2: $PASS2
-
+  type: http
+  http:
+    url: https://127.0.0.1:7391/hui/hysteria2/auth
+    insecure: true
+trafficStats:
+  listen: \":7653\"
+  secret: ${JWT_SECRET}
 masquerade:
   type: proxy
   proxy:
     url: https://www.apple.com
-    rewriteHost: true
+    rewriteHost: true'''
+conn = sqlite3.connect('/usr/local/h-ui/data/h_ui.db')
+conn.execute('UPDATE config SET value=? WHERE key=?', (config, 'HYSTERIA2_CONFIG'))
+conn.execute('UPDATE config SET value=? WHERE key=?', ('1', 'HYSTERIA2_ENABLE'))
+conn.commit()
+conn.close()
+"
+
+# Перезапустить для применения
+systemctl restart h-ui
 ```
 
-**Docker Compose для Hysteria2:**
-
-```yaml
-services:
-  hysteria2:
-    image: tobyxdd/hysteria:v2
-    container_name: hysteria2
-    restart: always
-    network_mode: host
-    volumes:
-      - ./config.yaml:/etc/hysteria/config.yaml
-      - /root/3x-ui/cert/cert.pem:/etc/hysteria/cert.pem:ro
-      - /root/3x-ui/cert/private.key:/etc/hysteria/private.key:ro
-    command: ["server", "-c", "/etc/hysteria/config.yaml"]
-```
+**Получить/сбросить креды панели:**
 
 ```bash
-cd /root/hysteria2
-docker compose pull
-docker compose up -d
+systemctl stop h-ui
+cd /usr/local/h-ui && ./h-ui reset
+systemctl start h-ui
+# Дефолт (ручная установка): sysadmin / sysadmin
 ```
 
 **Проверка:**
 
 ```bash
 sleep 3
-docker logs hysteria2
-# Должно быть: "server up and running"
+curl -sk -o /dev/null -w '%{http_code}' https://localhost:7391/
+# Должно быть: 200
+
+ss -ulnp | grep :443
+# Должно показать: hysteria-linux-...
 ```
 
+Панель доступна по адресу: `https://<IP>:7391`
+
 > Hysteria2 использует 443/UDP (QUIC), не конфликтует с VLESS на 443/TCP
+> Управление пользователями — через веб-панель h-ui (добавление, трафик, лимиты)
 
 ---
 
@@ -497,14 +524,17 @@ https://t.me/proxy?server=<IP>&port=993&secret=<ТВОЙ_СЕКРЕТ>
 **Важно для Trojan:**
 - allowInsecure = true (самоподписной сертификат)
 
-**Hysteria2** — через config.yaml:
-- Добавить строку в секцию userpass: `ИмяЮзера: <пароль>`
-- Перезапустить: `docker restart hysteria2`
+**Hysteria2** — через веб-панель h-ui:
+- URL: `https://<IP>:7391`
+- Добавить пользователя в разделе Accounts
+- Панель генерирует ссылку автоматически (добавить `insecure=1` если самоподписной сертификат)
 
-**Ссылка для клиента:**
+**Формат ссылки:**
 ```
-hysteria2://ИмяЮзера:пароль@<IP>:443?insecure=1#название
+hysteria2://ИмяЮзера.пароль@<IP>:443/?insecure=1#название
 ```
+
+> **Важно:** в h-ui auth-строка клиента — это `username.password` (точка-разделитель), а не `username:password`
 
 ---
 
@@ -522,8 +552,10 @@ hysteria2://ИмяЮзера:пароль@<IP>:443?insecure=1#название
 | `/root/3x-ui/db/x-ui.db`                         | БД 3x-ui (настройки, inbounds, клиенты) |
 | `/root/3x-ui/cert/cert.pem`                      | TLS сертификат (общий)                  |
 | `/root/3x-ui/cert/private.key`                   | TLS приватный ключ (общий)              |
-| `/root/hysteria2/docker-compose.yml`             | Docker Compose (Hysteria2)              |
-| `/root/hysteria2/config.yaml`                    | Конфиг Hysteria2 (пользователи тут)     |
+| `/usr/local/h-ui/h-ui`                           | Бинарник h-ui (панель Hysteria2)         |
+| `/usr/local/h-ui/data/h_ui.db`                   | БД h-ui (конфиг, пользователи)           |
+| `/usr/local/h-ui/bin/hysteria-linux-amd64`       | Бинарник Hysteria2 (управляется h-ui)    |
+| `/etc/systemd/system/h-ui.service`               | Systemd unit h-ui                        |
 | `/etc/mtg/config.toml`                           | Конфиг MTProto-прокси (секрет, порт)    |
 
 ---
@@ -536,8 +568,7 @@ templates/
 ├── ssh_socket_override.conf       -- systemd socket override
 ├── jail.local                     -- конфиг fail2ban
 ├── docker-compose.yml             -- Docker Compose (3x-ui)
-├── hysteria2-docker-compose.yml   -- Docker Compose (Hysteria2)
-├── hysteria2-config.yaml          -- Шаблон конфига Hysteria2 (без паролей)
+├── h-ui.service                   -- Systemd unit для h-ui (панель Hysteria2)
 ├── mtg-config.toml                -- Шаблон конфига MTProto (без секрета)
 ├── 99-bbr.conf                    -- sysctl BBR
 ├── 20auto-upgrades                -- apt автообновления
@@ -588,7 +619,7 @@ ssh root@<IP> "echo '<YOUR_PUBLIC_KEY from server_key.pub>' >> /root/.ssh/author
 **5. Применить настройки:**
 
 ```bash
-ssh root@<IP> "sysctl -p /etc/sysctl.d/99-bbr.conf && sshd -t && systemctl daemon-reload && systemctl restart ssh.socket ssh.service && systemctl enable fail2ban && systemctl restart fail2ban && ufw --force reset && ufw default deny incoming && ufw default allow outgoing && ufw allow 59222/tcp comment 'SSH' && ufw allow 2053/tcp comment '3x-ui panel' && ufw allow 443/tcp comment 'VLESS/Trojan TLS' && ufw allow 443/udp comment 'Hysteria2 QUIC' && ufw allow 8443/tcp comment 'Trojan-TCP' && ufw allow 993/tcp comment 'MTProto proxy (Telegram)' && echo y | ufw enable"
+ssh root@<IP> "sysctl -p /etc/sysctl.d/99-bbr.conf && sshd -t && systemctl daemon-reload && systemctl restart ssh.socket ssh.service && systemctl enable fail2ban && systemctl restart fail2ban && ufw --force reset && ufw default deny incoming && ufw default allow outgoing && ufw allow 59222/tcp comment 'SSH' && ufw allow 2053/tcp comment '3x-ui panel' && ufw allow 443/tcp comment 'VLESS/Trojan TLS' && ufw allow 443/udp comment 'Hysteria2 QUIC' && ufw allow 7391/tcp comment 'h-ui panel' && ufw allow 8443/tcp comment 'Trojan-TCP' && ufw allow 993/tcp comment 'MTProto proxy (Telegram)' && echo y | ufw enable"
 ```
 
 **6. 3x-ui:**
@@ -603,13 +634,16 @@ ssh -p 59222 -i creds/server_key root@<IP> "cd /root/3x-ui && docker compose up 
 # Создать inbound'ы (шаг 9)
 ```
 
-**7. Hysteria2:**
+**7. Hysteria2 (h-ui):**
 
 ```bash
-mkdir -p /root/hysteria2
-scp -P 22 templates/hysteria2-docker-compose.yml root@<IP>:/root/hysteria2/docker-compose.yml
-scp -P 22 templates/secrets/hysteria2-config.yaml root@<IP>:/root/hysteria2/config.yaml
-ssh -p 59222 -i creds/server_key root@<IP> "cd /root/hysteria2 && docker compose up -d"
+# Установить h-ui (шаг 10 из гайда)
+ssh -p 59222 -i creds/server_key root@<IP> "mkdir -p /usr/local/h-ui/ && \
+  curl -fsSL https://github.com/jonssonyan/h-ui/releases/latest/download/h-ui-linux-amd64 \
+  -o /usr/local/h-ui/h-ui && chmod +x /usr/local/h-ui/h-ui"
+scp -P 59222 -i creds/server_key templates/h-ui.service root@<IP>:/etc/systemd/system/h-ui.service
+ssh -p 59222 -i creds/server_key root@<IP> "systemctl daemon-reload && systemctl enable h-ui && systemctl restart h-ui"
+# Настроить HTTPS, Hysteria2 конфиг и пользователей через веб-панель https://<IP>:7391
 ```
 
 **8. MTProto-прокси:**
@@ -655,28 +689,29 @@ ss -ulnp          # UDP порты
 
 ```bash
 docker logs 3x-ui --tail 30
-docker logs hysteria2 --tail 30
 docker logs mtg --tail 30
 docker logs -f 3x-ui              # в реальном времени
+journalctl -u h-ui --no-pager -n 30   # h-ui панель
+cat /usr/local/h-ui/logs/hysteria2.log # Hysteria2 через h-ui
 ```
 
 **Перезапуск:**
 
 ```bash
 docker restart 3x-ui
-docker restart hysteria2
 docker restart mtg
+systemctl restart h-ui             # h-ui + Hysteria2
 ```
 
 **Бэкап БД (самое важное!):**
 
 ```bash
 cp /root/3x-ui/db/x-ui.db ~/x-ui-backup.db
+cp /usr/local/h-ui/data/h_ui.db ~/h-ui-backup.db
 ```
 
 **Добавить пользователя Hysteria2:**
-- Редактировать `/root/hysteria2/config.yaml`, добавить строку в userpass
-- Затем: `docker restart hysteria2`
+- Через веб-панель h-ui: `https://<IP>:7391` → Accounts → Add
 
 **Заблокировать IP вручную:**
 

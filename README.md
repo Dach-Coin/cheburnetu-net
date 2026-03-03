@@ -8,7 +8,7 @@
 | ---------------- | -------- | ------------ | -------------------------------------------- |
 | **VLESS + TLS**  | 443/TCP  | 3x-ui / Xray | Основной VPN — маскируется под обычный HTTPS |
 | **Trojan + TLS** | 8443/TCP | 3x-ui / Xray | Резервный VPN — альтернативный протокол      |
-| **Hysteria2**    | 443/UDP  | QUIC         | Быстрый VPN для видео и скачивания (UDP)     |
+| **Hysteria2**    | 443/UDP  | h-ui + QUIC  | Быстрый VPN для видео и скачивания (UDP)     |
 | **MTProto**      | 993/TCP  | mtg v2       | Прокси для Telegram без VPN-приложения       |
 
 Дополнительно:
@@ -110,7 +110,7 @@ ssh -i creds/server_key -p 59222 root@<IP_СЕРВЕРА>
 7. Установка Docker и запуск 3x-ui
 8. Настройка 3x-ui — HTTPS, пароль, скрытый URL
 9. Создание inbound'ов — VLESS (443) и Trojan (8443)
-10. Установка Hysteria2 (443/UDP)
+10. Установка h-ui + Hysteria2 (443/UDP, панель 7391/TCP)
 11. Установка MTProto-прокси для Telegram (993/TCP)
 
 Все пароли и секреты генерируются случайно при каждом запуске. Скрипт не содержит захардкоженных credentials.
@@ -122,6 +122,7 @@ ssh -i creds/server_key -p 59222 root@<IP_СЕРВЕРА>
 ```bash
 SSH_PORT=59222          # Порт SSH
 PANEL_PORT=2053         # Порт веб-панели 3x-ui
+HUI_PORT=7391           # Порт веб-панели h-ui (Hysteria2)
 XUI_VERSION="2.5.7"    # Версия 3x-ui
 HY2_USER1="User1"      # Имя пользователя Hysteria2
 HY2_USER2="User2"      # Имя пользователя Hysteria2
@@ -142,8 +143,7 @@ HY2_USER2="User2"      # Имя пользователя Hysteria2
 │   ├── ssh_socket_override.conf
 │   ├── jail.local
 │   ├── docker-compose.yml
-│   ├── hysteria2-config.yaml
-│   ├── hysteria2-docker-compose.yml
+│   ├── h-ui.service              — Systemd unit для h-ui (панель Hysteria2)
 │   ├── mtg-config.toml
 │   ├── 99-bbr.conf
 │   ├── 20auto-upgrades
