@@ -28,6 +28,7 @@ set -euo pipefail
 SSH_PORT=59222          # Новый порт SSH
 PANEL_PORT=2053         # Порт веб-панели 3x-ui
 HUI_PORT=7391           # Порт веб-панели h-ui (Hysteria2)
+HUI_BASE_PATH=""        # basePath h-ui (пусто = сгенерировать)
 XUI_VERSION="2.5.7"     # Версия образа 3x-ui
 HY2_USER1="User1"       # Имя первого пользователя Hysteria2
 HY2_USER2="User2"       # Имя второго пользователя Hysteria2
@@ -166,23 +167,21 @@ step4_ssh() {
     sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/'   /etc/ssh/sshd_config
     sed -i 's/^#*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication no/' /etc/ssh/sshd_config
 
-    # systemd socket override — ВАЖНО: явно оба IPv4 и IPv6!
-    # Без явного 0.0.0.0 сокет создаётся только для IPv6 и снаружи не работает.
-    mkdir -p /etc/systemd/system/ssh.socket.d
-    cat > /etc/systemd/system/ssh.socket.d/override.conf << EOF
-[Socket]
-ListenStream=
-ListenStream=0.0.0.0:${SSH_PORT}
-ListenStream=[::]:${SSH_PORT}
-EOF
+    # Отключить ssh.socket — на Ubuntu 24.04 socket activation может
+    # молча дропать соединения после DoS-атак или при проблемах с handoff.
+    # sshd должен слушать порт напрямую через ssh.service.
+    systemctl stop ssh.socket 2>/dev/null || true
+    systemctl disable ssh.socket 2>/dev/null || true
+    rm -rf /etc/systemd/system/ssh.socket.d
 
     # Проверка конфига
     mkdir -p /run/sshd
     sshd -t || fail "Ошибка в sshd_config"
 
-    # Применить
+    # Применить — только ssh.service, без socket
     systemctl daemon-reload
-    systemctl restart ssh.socket ssh.service
+    systemctl enable ssh.service
+    systemctl restart ssh.service
 
     # Проверка (ждём до 15 сек)
     wait_for "sshd порт ${SSH_PORT}" 15 "ss -tlnp | grep -q ':${SSH_PORT}'" \
@@ -223,14 +222,23 @@ bantime  = 3600
 findtime = 600
 maxretry = 5
 banaction = ufw
+backend  = systemd
 
 [sshd]
 enabled  = true
 port     = ${SSH_PORT}
 filter   = sshd
-logpath  = /var/log/auth.log
 maxretry = 3
 bantime  = 7200
+
+[sshd-preauth]
+enabled  = true
+port     = ${SSH_PORT}
+filter   = sshd
+mode     = aggressive
+maxretry = 5
+findtime = 60
+bantime  = 3600
 EOF
 
     systemctl enable fail2ban
@@ -240,7 +248,7 @@ EOF
     wait_for "fail2ban sshd jail" 15 "fail2ban-client status sshd" \
         || warn "jail sshd ещё не готов (нормально при первом запуске)"
 
-    ok "fail2ban настроен"
+    ok "fail2ban настроен (sshd + sshd-preauth)"
 }
 
 # ===================== ШАГ 7: Docker + 3x-ui ================================
@@ -285,7 +293,7 @@ services:
     restart: unless-stopped
 EOF
 
-    cd /root/3x-ui && docker compose up -d
+    (cd /root/3x-ui && docker compose up -d)
 
     # Ждём пока контейнер поднимется и панель стартует (до 60 сек)
     wait_for "3x-ui контейнер" 60 "docker ps | grep -q '3x-ui'" \
@@ -362,6 +370,8 @@ step9_inbounds() {
         --data-urlencode 'total=0' --data-urlencode 'expiryTime=0' \
         --data-urlencode 'listen=' > /dev/null
 
+    rm -f /tmp/xui_c.txt
+
     docker restart 3x-ui
 
     # Ждём пока xray поднимет порты 443 и 8443 (до 30 сек)
@@ -380,6 +390,7 @@ step10_hysteria2() {
 
     [[ -z "${HY2_PASS1}" ]] && HY2_PASS1=$(gen_pass)
     [[ -z "${HY2_PASS2}" ]] && HY2_PASS2=$(gen_pass)
+    [[ -z "${HUI_BASE_PATH}" ]] && HUI_BASE_PATH="/$(openssl rand -hex 6)"
 
     # Скачать h-ui
     mkdir -p /usr/local/h-ui/
@@ -398,6 +409,8 @@ Wants=network.target
 Type=simple
 WorkingDirectory=/usr/local/h-ui/
 ExecStart=/usr/local/h-ui/h-ui -p ${HUI_PORT}
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
@@ -415,6 +428,15 @@ EOF
     sqlite3 /usr/local/h-ui/data/h_ui.db \
         "UPDATE config SET value='/root/3x-ui/cert/private.key' WHERE key='H_UI_KEY_PATH';"
 
+    # basePath — скрывает панель за случайным URL (без него — 404)
+    python3 -c "
+import sqlite3
+conn = sqlite3.connect('/usr/local/h-ui/data/h_ui.db')
+conn.execute('UPDATE config SET value=? WHERE key=?', ('${HUI_BASE_PATH}', 'H_UI_WEB_CONTEXT'))
+conn.commit()
+conn.close()
+"
+
     # Настроить Hysteria2 конфиг
     local JWT_SECRET
     JWT_SECRET=$(sqlite3 /usr/local/h-ui/data/h_ui.db "SELECT value FROM config WHERE key='JWT_SECRET';")
@@ -431,7 +453,7 @@ tls:
 auth:
   type: http
   http:
-    url: https://127.0.0.1:${HUI_PORT}/hui/hysteria2/auth
+    url: https://127.0.0.1:${HUI_PORT}${HUI_BASE_PATH}/hui/hysteria2/auth
     insecure: true
 trafficStats:
   listen: \":7653\"
@@ -526,7 +548,7 @@ print_summary() {
     echo ""
 
     echo -e "${BOLD}── h-ui (Hysteria2) ─────────────────────────────────────────${NC}"
-    echo "  Панель: https://${SERVER_IP}:${HUI_PORT}"
+    echo "  Панель: https://${SERVER_IP}:${HUI_PORT}${HUI_BASE_PATH}"
     echo "  Логин:  sysadmin / sysadmin  (сменить после первого входа!)"
     echo "  URI ${HY2_USER1}: hysteria2://${HY2_USER1}.${HY2_PASS1}@${SERVER_IP}:443/?insecure=1#hy2-${HY2_USER1}"
     echo "  URI ${HY2_USER2}: hysteria2://${HY2_USER2}.${HY2_PASS2}@${SERVER_IP}:443/?insecure=1#hy2-${HY2_USER2}"
@@ -562,7 +584,7 @@ USER=admin
 PASS=${PANEL_PASSWORD}
 
 [h-ui (Hysteria2)]
-PANEL=https://${SERVER_IP}:${HUI_PORT}
+PANEL=https://${SERVER_IP}:${HUI_PORT}${HUI_BASE_PATH}
 PANEL_USER=sysadmin
 PANEL_PASS=sysadmin
 URI_${HY2_USER1}=hysteria2://${HY2_USER1}.${HY2_PASS1}@${SERVER_IP}:443/?insecure=1#hy2-${HY2_USER1}

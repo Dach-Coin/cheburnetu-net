@@ -14,7 +14,7 @@
 Дополнительно:
 - SSH на нестандартном порту 59222 с авторизацией по ключу (пароль отключён)
 - UFW файрвол — открыты только нужные порты
-- fail2ban — защита от брутфорса SSH
+- fail2ban — защита от брутфорса и connection flood SSH
 - BBR — ускорение TCP
 - Автоматические обновления безопасности
 
@@ -135,13 +135,12 @@ HY2_USER2="User2"      # Имя пользователя Hysteria2
 ├── deploy_phase1.py              — Python-скрипт: деплой setup.sh на сервер + скачивание ключей
 ├── deploy_verify.py              — Python-скрипт: проверка сервера после деплоя
 ├── deploy_config.example.ini     — Шаблон конфигурации (скопировать в deploy_config.ini)
-├── deploy_config.ini             — Ваш конфиг с IP/паролем сервера (в .gitignore)
+├── deploy_config.ini             — Ваш конфиг с IP/паролем сервера (⚠️ в .gitignore, не коммитить!)
 ├── SETUP_GUIDE.md                — Пошаговый гайд (ручная установка)
 ├── AGENTS.md                     — Инструкции для AI-ассистентов
 ├── templates/                    — Шаблоны конфигов (без секретов)
 │   ├── sshd_config
-│   ├── ssh_socket_override.conf
-│   ├── jail.local
+│   ├── jail.local                — fail2ban (sshd + sshd-preauth)
 │   ├── docker-compose.yml
 │   ├── h-ui.service              — Systemd unit для h-ui (панель Hysteria2)
 │   ├── mtg-config.toml
@@ -157,14 +156,7 @@ HY2_USER2="User2"      # Имя пользователя Hysteria2
 
 При написании и тестировании скрипта были обнаружены подводные камни, которые **уже учтены в setup.sh**, но полезно знать:
 
-**systemd SSH socket — только IPv6 по умолчанию.** При указании `ListenStream=59222` systemd создаёт только IPv6-сокет `[::]:59222`. Подключиться извне по IPv4 невозможно — сервер станет недоступен. Решение — явно указывать оба адреса:
-
-```ini
-[Socket]
-ListenStream=
-ListenStream=0.0.0.0:59222
-ListenStream=[::]:59222
-```
+**systemd ssh.socket — отключаем.** Ubuntu 24.04 по умолчанию использует socket activation для SSH (`ssh.socket`). После DoS-атак socket activation может молча дропать соединения без логирования. Решение — отключить `ssh.socket` и запускать sshd напрямую через `ssh.service` (setup.sh делает это автоматически).
 
 **sshd -t требует /run/sshd.** На свежей Ubuntu 24.04 каталог `/run/sshd` не создан. Команда `sshd -t` (проверка конфига) падает с ошибкой "Missing privilege separation directory". Решение — `mkdir -p /run/sshd` перед проверкой.
 

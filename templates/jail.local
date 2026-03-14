@@ -3,11 +3,20 @@ bantime = 3600
 findtime = 600
 maxretry = 5
 banaction = ufw
+backend = systemd
 
 [sshd]
 enabled = true
 port = 59222
 filter = sshd
-logpath = /var/log/auth.log
 maxretry = 3
 bantime = 7200
+
+[sshd-preauth]
+enabled = true
+port = 59222
+filter = sshd
+mode = aggressive
+maxretry = 5
+findtime = 60
+bantime = 3600

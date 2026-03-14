@@ -146,28 +146,26 @@ sed -i 's/^#*PermitEmptyPasswords.*/PermitEmptyPasswords no/' /etc/ssh/sshd_conf
 sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 sed -i 's/^#*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication no/' /etc/ssh/sshd_config
 
-# Настроить systemd socket (Ubuntu 24.04!)
-# ВАЖНО: явно указать 0.0.0.0 и [::] — иначе слушает только IPv6!
-mkdir -p /etc/systemd/system/ssh.socket.d
-cat > /etc/systemd/system/ssh.socket.d/override.conf << 'EOF'
-[Socket]
-ListenStream=
-ListenStream=0.0.0.0:59222
-ListenStream=[::]:59222
-EOF
+# Отключить ssh.socket (Ubuntu 24.04)
+# ВАЖНО: socket activation может молча дропать соединения после DoS-атак.
+# sshd должен слушать порт напрямую через ssh.service.
+systemctl stop ssh.socket 2>/dev/null || true
+systemctl disable ssh.socket 2>/dev/null || true
+rm -rf /etc/systemd/system/ssh.socket.d
 
 # Применить
 mkdir -p /run/sshd   # нужен для sshd -t на Ubuntu 24.04
 sshd -t && echo "OK"
 systemctl daemon-reload
-systemctl restart ssh.socket ssh.service
+systemctl enable ssh.service
+systemctl restart ssh.service
 ```
 
 **Проверка:**
 
 ```bash
 ss -tlnp | grep sshd
-# Должно показать *:59222
+# Должно показать 0.0.0.0:59222 и [::]:59222
 ```
 
 ---
@@ -204,19 +202,30 @@ bantime = 3600
 findtime = 600
 maxretry = 5
 banaction = ufw
+backend = systemd
 
 [sshd]
 enabled = true
 port = 59222
 filter = sshd
-logpath = /var/log/auth.log
 maxretry = 3
 bantime = 7200
+
+[sshd-preauth]
+enabled = true
+port = 59222
+filter = sshd
+mode = aggressive
+maxretry = 5
+findtime = 60
+bantime = 3600
 EOF
 
 systemctl enable fail2ban
 systemctl restart fail2ban
 ```
+
+> **sshd-preauth** — защита от connection flood (DoS). Режим `aggressive` ловит `Connection closed [preauth]`, которые стандартный jail пропускает.
 
 **Проверка:**
 
@@ -391,6 +400,23 @@ sqlite3 /usr/local/h-ui/data/h_ui.db \
   "UPDATE config SET value='/root/3x-ui/cert/private.key' WHERE key='H_UI_KEY_PATH';"
 ```
 
+**Установить basePath (скрывает панель за случайным URL):**
+
+```bash
+# Сгенерировать случайный basePath
+HUI_BASE_PATH="/$(openssl rand -hex 6)"
+
+python3 -c "
+import sqlite3
+conn = sqlite3.connect('/usr/local/h-ui/data/h_ui.db')
+conn.execute('UPDATE config SET value=\"${HUI_BASE_PATH}\" WHERE key=\"H_UI_WEB_CONTEXT\"')
+conn.commit()
+conn.close()
+"
+```
+
+> **ВАЖНО:** после установки basePath, auth URL для Hysteria2 тоже должен включать basePath
+
 **Настроить Hysteria2 через SQLite:**
 
 ```bash
@@ -405,7 +431,7 @@ tls:
 auth:
   type: http
   http:
-    url: https://127.0.0.1:7391/hui/hysteria2/auth
+    url: https://127.0.0.1:7391${HUI_BASE_PATH}/hui/hysteria2/auth
     insecure: true
 trafficStats:
   listen: \":7653\"
@@ -446,7 +472,7 @@ ss -ulnp | grep :443
 # Должно показать: hysteria-linux-...
 ```
 
-Панель доступна по адресу: `https://<IP>:7391`
+Панель доступна по адресу: `https://<IP>:7391/<basePath>/`
 
 > Hysteria2 использует 443/UDP (QUIC), не конфликтует с VLESS на 443/TCP
 > Управление пользователями — через веб-панель h-ui (добавление, трафик, лимиты)
@@ -543,8 +569,7 @@ hysteria2://ИмяЮзера.пароль@<IP>:443/?insecure=1#название
 | Путь                                             | Описание                                |
 | ------------------------------------------------ | --------------------------------------- |
 | `/etc/ssh/sshd_config`                           | SSH конфиг                              |
-| `/etc/systemd/system/ssh.socket.d/override.conf` | SSH порт (systemd)                      |
-| `/etc/fail2ban/jail.local`                       | fail2ban                                |
+| `/etc/fail2ban/jail.local`                       | fail2ban (sshd + sshd-preauth)          |
 | `/etc/sysctl.d/99-bbr.conf`                      | BBR                                     |
 | `/etc/apt/apt.conf.d/20auto-upgrades`            | автообновления                          |
 | `/etc/apt/apt.conf.d/50unattended-upgrades`      | автообновления                          |
@@ -565,8 +590,7 @@ hysteria2://ИмяЮзера.пароль@<IP>:443/?insecure=1#название
 ```
 templates/
 ├── sshd_config                    -- конфиг SSH
-├── ssh_socket_override.conf       -- systemd socket override
-├── jail.local                     -- конфиг fail2ban
+├── jail.local                     -- конфиг fail2ban (sshd + sshd-preauth)
 ├── docker-compose.yml             -- Docker Compose (3x-ui)
 ├── h-ui.service                   -- Systemd unit для h-ui (панель Hysteria2)
 ├── mtg-config.toml                -- Шаблон конфига MTProto (без секрета)
@@ -601,11 +625,10 @@ scp -P 22 templates/20auto-upgrades root@<IP>:/etc/apt/apt.conf.d/
 scp -P 22 templates/50unattended-upgrades root@<IP>:/etc/apt/apt.conf.d/
 ```
 
-**3. SSH socket override:**
+**3. Отключить ssh.socket (Ubuntu 24.04):**
 
 ```bash
-ssh root@<IP> "mkdir -p /etc/systemd/system/ssh.socket.d"
-scp -P 22 templates/ssh_socket_override.conf root@<IP>:/etc/systemd/system/ssh.socket.d/override.conf
+ssh root@<IP> "systemctl stop ssh.socket 2>/dev/null; systemctl disable ssh.socket 2>/dev/null; rm -rf /etc/systemd/system/ssh.socket.d"
 ```
 
 **4. SSH ключ:**
@@ -619,7 +642,7 @@ ssh root@<IP> "echo '<YOUR_PUBLIC_KEY from server_key.pub>' >> /root/.ssh/author
 **5. Применить настройки:**
 
 ```bash
-ssh root@<IP> "sysctl -p /etc/sysctl.d/99-bbr.conf && sshd -t && systemctl daemon-reload && systemctl restart ssh.socket ssh.service && systemctl enable fail2ban && systemctl restart fail2ban && ufw --force reset && ufw default deny incoming && ufw default allow outgoing && ufw allow 59222/tcp comment 'SSH' && ufw allow 2053/tcp comment '3x-ui panel' && ufw allow 443/tcp comment 'VLESS/Trojan TLS' && ufw allow 443/udp comment 'Hysteria2 QUIC' && ufw allow 7391/tcp comment 'h-ui panel' && ufw allow 8443/tcp comment 'Trojan-TCP' && ufw allow 993/tcp comment 'MTProto proxy (Telegram)' && echo y | ufw enable"
+ssh root@<IP> "sysctl -p /etc/sysctl.d/99-bbr.conf && sshd -t && systemctl daemon-reload && systemctl enable ssh.service && systemctl restart ssh.service && systemctl enable fail2ban && systemctl restart fail2ban && ufw --force reset && ufw default deny incoming && ufw default allow outgoing && ufw allow 59222/tcp comment 'SSH' && ufw allow 2053/tcp comment '3x-ui panel' && ufw allow 443/tcp comment 'VLESS/Trojan TLS' && ufw allow 443/udp comment 'Hysteria2 QUIC' && ufw allow 7391/tcp comment 'h-ui panel' && ufw allow 8443/tcp comment 'Trojan-TCP' && ufw allow 993/tcp comment 'MTProto proxy (Telegram)' && echo y | ufw enable"
 ```
 
 **6. 3x-ui:**
@@ -711,7 +734,7 @@ cp /usr/local/h-ui/data/h_ui.db ~/h-ui-backup.db
 ```
 
 **Добавить пользователя Hysteria2:**
-- Через веб-панель h-ui: `https://<IP>:7391` → Accounts → Add
+- Через веб-панель h-ui: `https://<IP>:7391/<basePath>/` → Accounts → Add
 
 **Заблокировать IP вручную:**
 

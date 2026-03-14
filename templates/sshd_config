@@ -4,11 +4,11 @@ Port 59222
 PermitRootLogin prohibit-password
 MaxAuthTries 3
 PubkeyAuthentication yes
-PasswordAuthentication yes
+PasswordAuthentication no
 PermitEmptyPasswords no
 KbdInteractiveAuthentication no
 UsePAM yes
-X11Forwarding yes
+X11Forwarding no
 PrintMotd no
 AcceptEnv LANG LC_*
 Subsystem	sftp	/usr/lib/openssh/sftp-server
