@@ -29,7 +29,7 @@ SSH_PORT=59222          # Новый порт SSH
 PANEL_PORT=2053         # Порт веб-панели 3x-ui
 HUI_PORT=7391           # Порт веб-панели h-ui (Hysteria2)
 HUI_BASE_PATH=""        # basePath h-ui (пусто = сгенерировать)
-XUI_VERSION="2.5.7"     # Версия образа 3x-ui
+XUI_VERSION="2.8.11"    # Версия образа 3x-ui
 HY2_USER1="User1"       # Имя первого пользователя Hysteria2
 HY2_USER2="User2"       # Имя второго пользователя Hysteria2
 

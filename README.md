@@ -123,7 +123,7 @@ ssh -i creds/server_key -p 59222 root@<IP_СЕРВЕРА>
 SSH_PORT=59222          # Порт SSH
 PANEL_PORT=2053         # Порт веб-панели 3x-ui
 HUI_PORT=7391           # Порт веб-панели h-ui (Hysteria2)
-XUI_VERSION="2.5.7"    # Версия 3x-ui
+XUI_VERSION="2.8.11"   # Версия 3x-ui
 HY2_USER1="User1"      # Имя пользователя Hysteria2
 HY2_USER2="User2"      # Имя пользователя Hysteria2
 ```
@@ -208,7 +208,7 @@ https://t.me/proxy?server=<IP>&port=993&secret=<SECRET>
 - **v2rayNG** (Android) / **v2rayN** (ПК) — проверенная классика для VLESS и Trojan
 - **NekoBox** — для продвинутых пользователей, гибкие настройки
 
-> **Важно:** при подключении к VLESS/Trojan включите **allowInsecure = true** (самоподписной сертификат). Для VLESS оставьте Flow **пустым** (не xtls-rprx-vision).
+> **Важно:** при подключении к VLESS/Trojan включите **allowInsecure = true** (самоподписной сертификат). Для VLESS установите Flow = **xtls-rprx-vision** (маскировка TLS-в-TLS паттерна).
 
 ## Развёртывание через AI-ассистента
 

@@ -262,7 +262,7 @@ version: "3"
 
 services:
   3x-ui:
-    image: ghcr.io/mhsanaei/3x-ui:2.5.7
+    image: ghcr.io/mhsanaei/3x-ui:2.8.11
     container_name: 3x-ui
     hostname: yourhostname
     volumes:
@@ -544,11 +544,59 @@ https://t.me/proxy?server=<IP>&port=993&secret=<ТВОЙ_СЕКРЕТ>
 
 **Важно для VLESS:**
 - allowInsecure = true (самоподписной сертификат)
-- Flow: оставить ПУСТЫМ (не xtls-rprx-vision!)
+- Flow: **xtls-rprx-vision** (маскировка TLS-в-TLS паттерна)
 - Fingerprint: chrome
 
 **Важно для Trojan:**
 - allowInsecure = true (самоподписной сертификат)
+
+> **Внимание:** на сервере используется самоподписной сертификат, поэтому в клиентских конфигах
+> обязательно нужно включить `"insecure": true` (sing-box/Hiddify) или `allowInsecure = true` (v2rayNG/v2rayN).
+> Без этого клиент откажется подключаться из-за ошибки проверки сертификата.
+
+**Пример конфига sing-box/Hiddify — VLESS:**
+```json
+{
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-tls",
+      "server": "<IP>",
+      "server_port": 443,
+      "uuid": "<UUID>",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "insecure": true,
+        "disable_sni": true,
+        "alpn": ["h2", "http/1.1"]
+      },
+      "packet_encoding": "xudp"
+    }
+  ]
+}
+```
+
+**Пример конфига sing-box/Hiddify — Trojan:**
+```json
+{
+  "outbounds": [
+    {
+      "type": "trojan",
+      "tag": "trojan-tcp",
+      "server": "<IP>",
+      "server_port": 8443,
+      "password": "<PASSWORD>",
+      "tls": {
+        "enabled": true,
+        "insecure": true,
+        "disable_sni": true,
+        "alpn": ["h2", "http/1.1"]
+      }
+    }
+  ]
+}
+```
 
 **Hysteria2** — через веб-панель h-ui:
 - URL: `https://<IP>:7391`

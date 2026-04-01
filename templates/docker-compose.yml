@@ -1,6 +1,6 @@
 services:
   3x-ui:
-    image: ghcr.io/mhsanaei/3x-ui:2.5.7
+    image: ghcr.io/mhsanaei/3x-ui:2.8.11
     container_name: 3x-ui
     hostname: vpn-server
     volumes:
