@@ -5,3 +5,4 @@ tools/Hysteria2_VPN/gui_config.json
 creds/*
 !creds/Purpose_of_the_directory.md
 deploy_config.ini
+tmp

@@ -4,12 +4,15 @@
 
 ## Что разворачивается
 
-| Протокол         | Порт     | Технология   | Зачем                                        |
-| ---------------- | -------- | ------------ | -------------------------------------------- |
-| **VLESS + TLS**  | 443/TCP  | 3x-ui / Xray | Основной VPN — маскируется под обычный HTTPS |
-| **Trojan + TLS** | 8443/TCP | 3x-ui / Xray | Резервный VPN — альтернативный протокол      |
-| **Hysteria2**    | 443/UDP  | h-ui + QUIC  | Быстрый VPN для видео и скачивания (UDP)     |
-| **MTProto**      | 993/TCP  | mtg v2       | Прокси для Telegram без VPN-приложения       |
+| Протокол                      | Порт     | Технология   | Зачем                                              |
+| ----------------------------- | -------- | ------------ | -------------------------------------------------- |
+| **VLESS + Vision + Reality**  | 443/TCP  | 3x-ui / Xray | Основной VPN — неотличим от обычного TLS на yandex |
+| **VLESS + Vision + Reality**  | 2083/TCP | 3x-ui / Xray | Дубликат на нестандартном порту (запасной вход)    |
+| **Trojan + Reality**          | 2087/TCP | 3x-ui / Xray | Альтернативный протокол на нестандартном порту     |
+| **Hysteria2 + Salamander**    | 443/UDP  | h-ui + QUIC  | Быстрый VPN на QUIC, обфускация Salamander         |
+| **MTProto**                   | 993/TCP  | mtg v2       | Прокси для Telegram без VPN-приложения             |
+
+> **Reality dest/SNI = `www.yandex.ru`** — российский домен, маскировка под легитимный HTTPS-трафик до Yandex. `apple.com` и self-signed TLS-инбаунды (8443/8880/4443) сейчас детектируются современными DPI и из проекта удалены.
 
 Дополнительно:
 - SSH на нестандартном порту 59222 с авторизацией по ключу (пароль отключён)
@@ -53,22 +56,29 @@ pip install paramiko
 cp deploy_config.example.ini deploy_config.ini
 # Заполнить ip, password и т.д. в deploy_config.ini
 
-# 3. Запустить деплой (5-15 минут)
+# 3. ⚠️ Pre-check: убедиться что хостер вообще пригоден для VPN
+python deploy_precheck.py
+# Покажет: IP/AS, IPv6 egress, доступность Reality target'ов, ru-доменов
+# и реальную скорость канала (Cloudflare 30s sustained). Если fatal —
+# не деплой, ищи другой VPS.
+
+# 4. Запустить деплой (5-15 минут)
 python deploy_phase1.py
 
-# 4. Установить права на SSH-ключ
+# 5. Установить права на SSH-ключ (<IP> = ip из deploy_config.ini)
 # Linux / macOS:
-chmod 600 creds/server_key
+chmod 600 creds/<IP>/server_key
 # Windows (PowerShell):
-icacls "creds\server_key" /inheritance:r /grant:r "$env:USERNAME:(R)"
+icacls "creds\<IP>\server_key" /inheritance:r /grant:r "$env:USERNAME:(R)"
 
-# 5. Проверить, что всё работает
+# 6. Проверить, что всё работает
 python deploy_verify.py
 ```
 
-После завершения в `creds/` появятся:
+После завершения в `creds/<IP>/` появятся:
 - `server_key` — SSH-ключ для подключения
 - `credentials.txt` — все пароли и ссылки
+- `deploy_summary.txt` — копия итогового вывода скрипта
 
 ### Способ B — вручную на сервере
 
@@ -81,18 +91,18 @@ curl -O https://raw.githubusercontent.com/<OWNER>/<REPO>/main/setup.sh
 bash setup.sh
 
 # 3. Сохранить данные доступа из вывода скрипта:
-#    - SSH-ключ → creds/server_key
-#    - Credentials → creds/credentials.txt
+#    - SSH-ключ → creds/<IP>/server_key
+#    - Credentials → creds/<IP>/credentials.txt
 #    Все данные также на сервере в /root/vpn_credentials.txt
 
 # 4. Установить права на SSH-ключ
 # Linux / macOS:
-chmod 600 creds/server_key
+chmod 600 creds/<IP>/server_key
 # Windows (PowerShell):
-icacls "creds\server_key" /inheritance:r /grant:r "$env:USERNAME:(R)"
+icacls "creds\<IP>\server_key" /inheritance:r /grant:r "$env:USERNAME:(R)"
 
 # 5. Подключиться по ключу
-ssh -i creds/server_key -p 59222 root@<IP_СЕРВЕРА>
+ssh -i creds/<IP>/server_key -p 59222 root@<IP_СЕРВЕРА>
 
 > **Примечание:** При первом подключении SSH спросит подтверждение ключа — введите `yes` для добавления ключа в known_hosts. Если ранее был доступ к серверу по другому порту/ключу — удалите старые записи: `ssh-keygen -R <IP>`.
 ```
@@ -109,9 +119,10 @@ ssh -i creds/server_key -p 59222 root@<IP_СЕРВЕРА>
 6. Настройка fail2ban (защита от брутфорса)
 7. Установка Docker и запуск 3x-ui
 8. Настройка 3x-ui — HTTPS, пароль, скрытый URL
-9. Создание inbound'ов — VLESS (443) и Trojan (8443)
+9. Обновление Xray-ядра до свежей версии (через `docker cp`), создание трёх Reality inbound'ов (443/2083/2087) на SNI=`www.yandex.ru`, прописывание Xray template с DNS UseIPv4
 10. Установка h-ui + Hysteria2 (443/UDP, панель 7391/TCP)
 11. Установка MTProto-прокси для Telegram (993/TCP)
+В финале — egress-проверка: достижим ли target Reality и masquerade Hy2 с сервера (если хостер режет — выводится warning).
 
 Все пароли и секреты генерируются случайно при каждом запуске. Скрипт не содержит захардкоженных credentials.
 
@@ -123,15 +134,20 @@ ssh -i creds/server_key -p 59222 root@<IP_СЕРВЕРА>
 SSH_PORT=59222          # Порт SSH
 PANEL_PORT=2053         # Порт веб-панели 3x-ui
 HUI_PORT=7391           # Порт веб-панели h-ui (Hysteria2)
-XUI_VERSION="2.8.11"   # Версия 3x-ui
-HY2_USER1="User1"      # Имя пользователя Hysteria2
-HY2_USER2="User2"      # Имя пользователя Hysteria2
+XUI_VERSION="2.8.11"      # Образ панели 3x-ui (Xray внутри обновляется отдельно)
+XRAY_VERSION="26.3.27"    # Версия Xray для замены бинарника в контейнере
+REALITY_SNI="www.yandex.ru"   # Reality SNI/dest (target должен быть доступен с сервера)
+REALITY_TARGET="www.yandex.ru:443"
+HY2_MASQUERADE_URL="https://www.bing.com"  # маскировочный URL Hysteria2
+HY2_USER1="User1"         # Имя пользователя Hysteria2
+HY2_USER2="User2"         # Имя пользователя Hysteria2
 ```
 
 ## Структура проекта
 
 ```
 ├── setup.sh                      — Основной скрипт автонастройки (выполняется на сервере)
+├── deploy_precheck.py            — Pre-deploy проверка: IP/AS/egress/скорость канала (запускать до deploy_phase1.py)
 ├── deploy_phase1.py              — Python-скрипт: деплой setup.sh на сервер + скачивание ключей
 ├── deploy_verify.py              — Python-скрипт: проверка сервера после деплоя
 ├── deploy_config.example.ini     — Шаблон конфигурации (скопировать в deploy_config.ini)
@@ -148,8 +164,10 @@ HY2_USER2="User2"      # Имя пользователя Hysteria2
 │   ├── 20auto-upgrades
 │   └── 50unattended-upgrades
 └── creds/                        — Ваши данные доступа (в .gitignore)
-    ├── server_key
-    └── credentials.txt
+    └── <IP>/                     — Подпапка на каждый сервер (имя = IP)
+        ├── server_key
+        ├── credentials.txt
+        └── deploy_summary.txt
 ```
 
 ## Известные нюансы Ubuntu 24.04
@@ -161,6 +179,10 @@ HY2_USER2="User2"      # Имя пользователя Hysteria2
 **sshd -t требует /run/sshd.** На свежей Ubuntu 24.04 каталог `/run/sshd` не создан. Команда `sshd -t` (проверка конфига) падает с ошибкой "Missing privilege separation directory". Решение — `mkdir -p /run/sshd` перед проверкой.
 
 **Определение IP на dual-stack серверах.** Команды `curl ifconfig.me` и `hostname -I` могут вернуть IPv6-адрес вместо IPv4. Решение — `curl -4` или `ip -4 addr show scope global`.
+
+**Xray 26.x: agressive idle-teardown рубит push-уведомления.** Дефолты Xray 26.x для `policy.levels.0` (`connIdle=300`, `uplinkOnly=2`, `downlinkOnly=5`) закрывают TCP-сессию через 5 секунд тишины с одной стороны. Это убивает long-lived push-стримы (Telegram, WhatsApp, MQTT): клиент держит тихое соединение, ждёт push, а Xray его рубит → при заблокированном экране уведомления не приходят. Решение — `setup.sh` (step9c) явно прописывает `connIdle=1800, uplinkOnly=0, downlinkOnly=0` в шаблон, чтобы push-сессии переживали idle.
+
+**3x-ui «онлайн» индикатор — traffic-based, не connection-based.** Зелёный кружок в панели зажигается когда **сейчас идут байты** через Xray, а не когда «TCP-сессия установлена». Если клиент в фоне молчит (Doze-mode, заблокированный экран) — индикатор будет «офлайн», но сама VPN-сессия живая. Это нормально, не баг. Для статистики живых сессий смотреть `ss -tnp 'sport = :443'` или аналог на конкретном порту.
 
 ## Клиентские приложения
 
@@ -208,7 +230,18 @@ https://t.me/proxy?server=<IP>&port=993&secret=<SECRET>
 - **v2rayNG** (Android) / **v2rayN** (ПК) — проверенная классика для VLESS и Trojan
 - **NekoBox** — для продвинутых пользователей, гибкие настройки
 
-> **Важно:** при подключении к VLESS/Trojan включите **allowInsecure = true** (самоподписной сертификат). Для VLESS установите Flow = **xtls-rprx-vision** (маскировка TLS-в-TLS паттерна).
+> **Важно для Reality-инбаундов:** для VLESS на 443/2083 установите Flow = **xtls-rprx-vision**, fingerprint = **chrome**, spiderX = **/**. SNI клиента должен совпадать с `REALITY_SNI` сервера (по умолчанию `www.yandex.ru`). Public key и shortId берутся из панели 3x-ui при создании клиента.
+
+## Egress-фильтры хостера
+
+Reality маскировка работает корректно только если **target доступен с сервера** — при active probing DPI ходит через нас на target и должен получить настоящий handshake. Некоторые хостеры (французские/европейские VPS, особенно дешёвые) режут TCP/443 к российским доменам (vk.ru, mail.ru, ok.ru, dzen.ru), к Apple/Akamai CDN, к части GitHub CDN, или у них вообще битый IPv6.
+
+`setup.sh` в финале запускает `egress_check` — пингует target и предупреждает, если target unreachable. Если получили warning:
+
+- **Меняйте `REALITY_SNI`** на домен, который реально открывается с сервера (`google.com`, `microsoft.com`, `cloudflare.com` обычно работают везде; российский домен предпочтительнее, если работает)
+- Или **меняйте хостер** — для VPN-инфры важен чистый egress. AEZA, Hetzner, FirstByte/FirstVDS, Timeweb обычно норм.
+
+DNS внутри Xray принудительно настроен на **UseIPv4** (`xrayTemplateConfig` в БД 3x-ui) — это защищает от случая, когда у хостера AAAA-резолвинг ведёт в timeout. Если потребуется IPv6 — поменять `queryStrategy` через панель 3x-ui (Xray Configs).
 
 ## Развёртывание через AI-ассистента
 
@@ -229,8 +262,8 @@ https://t.me/proxy?server=<IP>&port=993&secret=<SECRET>
 1. Подключись к серверу по SSH
 2. Загрузи setup.sh на сервер и запусти его
 3. Дождись завершения и сохрани все данные доступа:
-   - SSH-ключ → creds/server_key
-   - Credentials → creds/credentials.txt
+   - SSH-ключ → creds/<IP>/server_key
+   - Credentials → creds/<IP>/credentials.txt
 4. Установи права на файл ключа (icacls на Windows / chmod на Linux)
 5. Проверь подключение по ключу на новом порту (59222)
 

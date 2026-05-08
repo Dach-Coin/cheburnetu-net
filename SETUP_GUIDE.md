@@ -1,4 +1,4 @@
-# VPN-сервер: Полный гайд по развертыванию
+﻿# VPN-сервер: Полный гайд по развертыванию
 
 **3x-ui + Xray + Hysteria2 на Ubuntu 24.04 VPS**
 
@@ -17,18 +17,20 @@ bash setup.sh
 
 Скрипт выполнит все шаги ниже автоматически и выведет данные доступа.
 
-**После запуска:**
-1. Скопировать приватный SSH-ключ из вывода скрипта → сохранить в `creds/server_key`
-2. Скопировать все credentials из вывода (или с сервера из `/root/vpn_credentials.txt`)
+**После запуска** (`<IP>` = ip сервера, под который мы делаем deploy):
+1. Скопировать приватный SSH-ключ из вывода скрипта → сохранить в `creds/<IP>/server_key`
+2. Скопировать все credentials из вывода (или с сервера из `/root/vpn_credentials.txt`) в `creds/<IP>/credentials.txt`
 3. Установить права на ключ:
 
 ```bash
 # Linux / macOS:
-chmod 600 creds/server_key
+chmod 600 creds/<IP>/server_key
 
 # Windows (PowerShell):
-icacls "creds\server_key" /inheritance:r /grant:r "$env:USERNAME:(R)"
+icacls "creds\<IP>\server_key" /inheritance:r /grant:r "$env:USERNAME:(R)"
 ```
+
+> Каждый сервер живёт в своей подпапке `creds/<IP>/`. `deploy_phase1.py` создаёт эту структуру автоматически.
 
 ### Требования для управления с ПК (paramiko)
 
@@ -45,14 +47,46 @@ pip install paramiko
 
 ## ТЕКУЩИЕ ПРОТОКОЛЫ
 
-1. **VLESS + TCP + TLS** — порт 443/TCP (через 3x-ui/Xray)
-2. **Trojan + TCP + TLS** — порт 8443/TCP (через 3x-ui/Xray)
-3. **Hysteria2 (QUIC)** — порт 443/UDP (h-ui панель + systemd)
-4. **MTProto proxy (Telegram)** — порт 993/TCP (mtg v2, отдельный Docker-контейнер)
+1. **VLESS + Vision + Reality** — порт 443/TCP (через 3x-ui/Xray)
+2. **VLESS + Vision + Reality** — порт 2083/TCP (резервный нестандартный порт)
+3. **Trojan + Reality** — порт 2087/TCP (через 3x-ui/Xray)
+4. **Hysteria2 (QUIC + Salamander)** — порт 443/UDP (h-ui панель + systemd)
+5. **MTProto proxy (Telegram)** — порт 993/TCP (mtg v2, отдельный Docker-контейнер)
 
-**Не работают на данной сети (блокируются DPI):**
+Reality dest/SNI: `www.yandex.ru` (российский домен → DPI-нейтрально, target доступен с большинства VPS).
+
+**Не работают на современной DPI-сети (исключены из проекта):**
+- Self-signed TLS на любых портах (8443/8880/4443) — DPI палит самоподписной сертификат
 - VMess (любой транспорт) — детектируется по fingerprint
 - Shadowsocks (legacy и 2022) — детектируется DPI
+
+### ⚠️ Pre-deploy sanity-check (обязательно)
+
+Перед `setup.sh`/`deploy_phase1.py` запустите готовый скрипт:
+
+```bash
+python deploy_precheck.py
+```
+
+Он за ~30 секунд проверит:
+- **IP/AS/OS** — что за хостер, страна, версия Ubuntu
+- **IPv6 egress** — работает ли v6 (битый v6 у части хостеров заставляет Xray тратить секунды на fallback)
+- **Reality target кандидаты** — `www.yandex.ru`, `www.microsoft.com`, `www.bing.com`, `cloudflare.com`, `icloud.com`
+- **Ru-домены** — реально ли через VPN откроются vk/mail/ok/yandex/sber/wb/ozon и пр. (если хостер режет — клиенты будут жаловаться)
+- **Скорость канала** — Cloudflare 30-секундная sustained-загрузка, в Mbit/s
+- **GitHub release CDN** — нужен для шага 9a (manual Xray upgrade)
+
+Если в выводе **fatal**: хостер не годится, не запускай deploy — потеряешь 15 минут зря. Меняй VPS.
+
+### Egress-фильтры хостеров (контекст)
+
+Reality маскировка работает только если **target доступен с сервера**. Активный пробинг DPI ходит через нас на target и должен получить настоящий handshake. Часть хостеров (особенно дешёвые европейские, AS56971 «Cloud56971» особенно) режут TCP/443 к российским доменам (vk.ru, mail.ru, ok.ru, dzen.ru), к части CDN (Akamai, Fastly, Azure Blob — куда указывает release-assets.githubusercontent.com), и/или у них битый IPv6.
+
+Если `www.yandex.ru` недоступен — варианты:
+- Подобрать SNI среди работающих доменов из вывода precheck
+- Сменить хостер: AEZA, Hetzner, FirstByte/FirstVDS, Timeweb обычно с чистым egress
+
+В финале `setup.sh` запускает `egress_check`, который выводит warning при недоступности target/masquerade.
 
 **Клиентские приложения:**
 - Телефон: v2rayNG (Android) — https://github.com/2dust/v2rayNG
@@ -176,13 +210,41 @@ ss -tlnp | grep sshd
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow 59222/tcp comment 'SSH'
-ufw allow 2053/tcp comment '3x-ui panel'
-ufw allow 443/tcp comment 'VLESS TLS'
-ufw allow 443/udp comment 'Hysteria2 QUIC'
-ufw allow 7391/tcp comment 'h-ui panel (Hysteria2)'
-ufw allow 8443/tcp comment 'Trojan TLS'
-ufw allow 993/tcp comment 'MTProto proxy (Telegram)'
+ufw allow 2053/tcp  comment '3x-ui panel'
+ufw allow 443/tcp   comment 'VLESS Reality (yandex)'
+ufw allow 443/udp   comment 'Hysteria2 QUIC+Salamander'
+ufw allow 7391/tcp  comment 'h-ui panel (Hysteria2)'
+ufw allow 2083/tcp  comment 'VLESS Reality (yandex)'
+ufw allow 2087/tcp  comment 'Trojan Reality (yandex)'
+ufw allow 8443/tcp  comment 'Trojan TLS self-signed (резерв)'
+ufw allow 8880/tcp  comment 'VLESS TLS self-signed (резерв)'
+ufw allow 8444/tcp  comment 'AnyTLS (sing-box)'
+ufw allow 993/tcp   comment 'MTProto proxy (Telegram)'
 echo 'y' | ufw enable
+```
+
+**Блок публичных сканеров (Censys/Shodan и т.п.):** их fingerprint-БД используется DPI для пометки VPN-серверов. `insert 1` — чтобы deny срабатывал ПЕРЕД allow:
+
+```bash
+# Censys.io (/24 corporate)
+for r in 162.142.125.0/24 167.94.138.0/24 167.94.145.0/24 167.94.146.0/24 \
+         167.248.133.0/24 199.45.154.0/24 199.45.155.0/24 206.168.34.0/24; do
+    ufw insert 1 deny from "$r" comment 'Censys/Shodan blocklist'
+done
+
+# Shodan corporate /24
+for r in 198.20.69.0/24 198.20.70.0/24 198.20.99.0/24 \
+         208.180.20.0/24 209.126.110.0/24 \
+         66.240.192.0/24 66.240.236.0/24; do
+    ufw insert 1 deny from "$r" comment 'Censys/Shodan blocklist'
+done
+
+# Shodan distributed scanners (на shared-провайдерах; Shodan ротирует — сверяться раз в полгода)
+for r in 71.6.135.131 71.6.146.130 71.6.146.185 71.6.158.166 71.6.165.200 71.6.167.142 \
+         80.82.77.33 80.82.77.139 82.221.105.6 82.221.105.7 \
+         85.25.43.94 85.25.103.50 88.198.36.144 88.198.59.10 93.120.27.62; do
+    ufw insert 1 deny from "$r" comment 'Censys/Shodan blocklist'
+done
 ```
 
 **Проверка:**
@@ -320,51 +382,87 @@ sqlite3 /root/3x-ui/db/x-ui.db "SELECT value FROM settings WHERE key='webBasePat
 
 ---
 
-### 9. Создать inbound'ы (VLESS + Trojan)
+### 9. Обновить Xray-ядро и создать Reality inbound'ы
+
+#### 9a. Замена Xray-бинарника на свежий
+
+Образ `3x-ui:2.8.11` содержит Xray ~26.2.6, в котором uTLS-фингерпринт отстаёт от актуального Chrome. Подменяем бинарник:
 
 ```bash
-# Залогиниться
+XRAY_VER="26.3.27"
+curl -fsSL -o /tmp/xray.zip \
+  "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VER}/Xray-linux-64.zip"
+python3 -m zipfile -e /tmp/xray.zip /tmp/xray-new/
+chmod +x /tmp/xray-new/xray
+docker cp 3x-ui:/app/bin/xray-linux-amd64 /root/3x-ui/xray-linux-amd64.old   # бэкап
+docker cp /tmp/xray-new/xray 3x-ui:/app/bin/xray-linux-amd64
+docker exec 3x-ui chmod +x /app/bin/xray-linux-amd64
+docker exec 3x-ui /app/bin/xray-linux-amd64 -version
+# Должно: Xray 26.3.27
+```
+
+Если хостер режет egress к `release-assets.githubusercontent.com` (TLS handshake timeout) — скачать zip локально и закинуть на сервер через `scp`.
+
+#### 9b. Reality inbound'ы (3 штуки)
+
+Все три — на одном SNI=`www.yandex.ru`, каждый со своей парой ключей X25519 (генерируется через `xray x25519` внутри контейнера) и одним рандомным shortID.
+
+```bash
 BASE="https://127.0.0.1:2053/<basePath>"
 curl -sk -c /tmp/c.txt -X POST "$BASE/login" \
   -d 'username=admin&password=<ПАРОЛЬ>'
+
+add_reality() {
+    local PORT="$1" PROTO="$2" REMARK="$3"
+    local KEYS PRIV PUB SID SETTINGS STREAM
+    KEYS=$(docker exec 3x-ui /app/bin/xray-linux-amd64 x25519)
+    PRIV=$(echo "$KEYS" | awk -F': ' '/Private key/ {print $2}')
+    PUB=$(echo  "$KEYS" | awk -F': ' '/Public key/  {print $2}')
+    SID=$(openssl rand -hex 8)
+    if [[ "$PROTO" == "vless" ]]; then
+        SETTINGS='{"clients":[],"decryption":"none","fallbacks":[]}'
+    else
+        SETTINGS='{"clients":[],"fallbacks":[]}'
+    fi
+    STREAM='{"network":"tcp","security":"reality","externalProxy":[],"realitySettings":{"show":false,"xver":0,"target":"www.yandex.ru:443","serverNames":["www.yandex.ru"],"privateKey":"'"$PRIV"'","shortIds":["'"$SID"'",""],"settings":{"publicKey":"'"$PUB"'","fingerprint":"chrome","serverName":"","spiderX":"/"}},"tcpSettings":{"acceptProxyProtocol":false,"header":{"type":"none"}}}'
+    curl -sk -b /tmp/c.txt -X POST "$BASE/panel/api/inbounds/add" \
+      --data-urlencode "remark=$REMARK" --data-urlencode 'enable=true' \
+      --data-urlencode "port=$PORT" --data-urlencode "protocol=$PROTO" \
+      --data-urlencode "settings=$SETTINGS" --data-urlencode "streamSettings=$STREAM" \
+      --data-urlencode 'sniffing={"enabled":true,"destOverride":["http","tls","quic","fakedns"]}' \
+      --data-urlencode 'up=0' --data-urlencode 'down=0' \
+      --data-urlencode 'total=0' --data-urlencode 'expiryTime=0' --data-urlencode 'listen='
+}
+add_reality 443  vless  vless-reality-443
+add_reality 2083 vless  vless-reality-2083
+add_reality 2087 trojan trojan-reality-2087
 ```
 
-**VLESS + TCP + TLS (порт 443):**
+#### 9c. Xray template — DNS UseIPv4 (защита от битого IPv6 хостера)
+
+У части хостеров AAAA-резолвинг отдаёт IPv6, который не маршрутизируется → Xray тратит секунды на v6-fallback при каждом запросе. Форсим IPv4:
 
 ```bash
-curl -sk -b /tmp/c.txt -X POST "$BASE/panel/api/inbounds/add" \
-  --data-urlencode 'remark=vless-tls' \
-  --data-urlencode 'enable=true' \
-  --data-urlencode 'port=443' \
-  --data-urlencode 'protocol=vless' \
-  --data-urlencode 'settings={"clients":[],"decryption":"none","fallbacks":[]}' \
-  --data-urlencode 'streamSettings={"network":"tcp","security":"tls","tlsSettings":{"serverName":"","minVersion":"1.2","maxVersion":"1.3","certificates":[{"certificateFile":"/root/cert/cert.pem","keyFile":"/root/cert/private.key"}],"alpn":["h2","http/1.1"],"settings":{"allowInsecure":true,"fingerprint":"chrome"}},"tcpSettings":{"acceptProxyProtocol":false,"header":{"type":"none"}}}' \
-  --data-urlencode 'sniffing={"enabled":true,"destOverride":["http","tls","quic","fakedns"]}' \
-  --data-urlencode 'up=0' --data-urlencode 'down=0' \
-  --data-urlencode 'total=0' --data-urlencode 'expiryTime=0' \
-  --data-urlencode 'listen='
-```
+docker exec 3x-ui sh -c 'cat /app/bin/config.json' | python3 -c '
+import json, sys
+c = json.load(sys.stdin)
+c.pop("inbounds", None)
+c["dns"] = {
+    "servers": ["1.1.1.1", "8.8.8.8", "https://1.1.1.1/dns-query"],
+    "queryStrategy": "UseIPv4"
+}
+for ob in c.get("outbounds", []):
+    if ob.get("protocol") == "freedom":
+        ob.setdefault("settings", {})["domainStrategy"] = "UseIPv4"
+print(json.dumps(c, indent=2, ensure_ascii=False))
+' > /tmp/xray_template.json
 
-**Trojan + TCP + TLS (порт 8443):**
-
-```bash
-curl -sk -b /tmp/c.txt -X POST "$BASE/panel/api/inbounds/add" \
-  --data-urlencode 'remark=trojan-tcp' \
-  --data-urlencode 'enable=true' \
-  --data-urlencode 'port=8443' \
-  --data-urlencode 'protocol=trojan' \
-  --data-urlencode 'settings={"clients":[],"fallbacks":[]}' \
-  --data-urlencode 'streamSettings={"network":"tcp","security":"tls","tlsSettings":{"serverName":"","minVersion":"1.2","maxVersion":"1.3","certificates":[{"certificateFile":"/root/cert/cert.pem","keyFile":"/root/cert/private.key"}],"alpn":["h2","http/1.1"],"settings":{"allowInsecure":true,"fingerprint":"chrome"}},"tcpSettings":{"acceptProxyProtocol":false,"header":{"type":"none"}}}' \
-  --data-urlencode 'sniffing={"enabled":true,"destOverride":["http","tls","quic","fakedns"]}' \
-  --data-urlencode 'up=0' --data-urlencode 'down=0' \
-  --data-urlencode 'total=0' --data-urlencode 'expiryTime=0' \
-  --data-urlencode 'listen='
-```
-
-```bash
-# Перезапустить для применения
+sqlite3 /root/3x-ui/db/x-ui.db \
+  "INSERT OR REPLACE INTO settings(key,value) VALUES('xrayTemplateConfig', readfile('/tmp/xray_template.json'));"
 docker restart 3x-ui
 ```
+
+3x-ui перегенерирует `bin/config.json`, подмешивая шаблон + inbound'ы из БД.
 
 ---
 
@@ -439,7 +537,7 @@ trafficStats:
 masquerade:
   type: proxy
   proxy:
-    url: https://www.apple.com
+    url: https://www.bing.com
     rewriteHost: true'''
 conn = sqlite3.connect('/usr/local/h-ui/data/h_ui.db')
 conn.execute('UPDATE config SET value=? WHERE key=?', (config, 'HYSTERIA2_CONFIG'))
@@ -497,7 +595,7 @@ mkdir -p /etc/mtg
 
 # Сгенерить секрет (каждый запуск даёт новый — сохрани!)
 docker run --rm nineseconds/mtg:2 generate-secret google.com
-# Пример вывода: ee37ec8160a09d1e96dbd4a9c2f5c8dd39676f6f676c652e636f6d
+# Пример вывода (формат): ee<32 hex-знаков, рандом><hex от google.com — 9676f6f676c652e636f6d>
 
 # Записать конфиг (подставить свой секрет)
 cat > /etc/mtg/config.toml << 'EOF'
@@ -538,38 +636,43 @@ https://t.me/proxy?server=<IP>&port=993&secret=<ТВОЙ_СЕКРЕТ>
 
 ### 12. Добавить клиентов
 
-**VLESS и Trojan** — через веб-панель 3x-ui:
+**VLESS Reality и Trojan Reality** — через веб-панель 3x-ui:
 - URL: `https://<IP>:2053/<basePath>/`
 - Для каждого inbound нажать "+" и создать клиента
+- Панель сама генерирует ссылку и QR с правильными `pbk`/`sid`/`spx` из inbound
 
-**Важно для VLESS:**
-- allowInsecure = true (самоподписной сертификат)
-- Flow: **xtls-rprx-vision** (маскировка TLS-в-TLS паттерна)
-- Fingerprint: chrome
+**Важно для VLESS Reality:**
+- Flow: **xtls-rprx-vision**
+- Fingerprint: **chrome**
+- spiderX: **/**
+- SNI клиента = `www.yandex.ru` (или ваш `REALITY_SNI`)
 
-**Важно для Trojan:**
-- allowInsecure = true (самоподписной сертификат)
+**Важно для Trojan Reality:**
+- Те же параметры (fp=chrome, spx=/, SNI=yandex.ru)
+- Flow в Trojan не используется
 
-> **Внимание:** на сервере используется самоподписной сертификат, поэтому в клиентских конфигах
-> обязательно нужно включить `"insecure": true` (sing-box/Hiddify) или `allowInsecure = true` (v2rayNG/v2rayN).
-> Без этого клиент откажется подключаться из-за ошибки проверки сертификата.
+> Для Reality `insecure`/`allowInsecure` НЕ нужен — сертификат не используется, клиент верифицирует сервер по `publicKey` (X25519). Это и есть преимущество Reality перед TLS.
 
-**Пример конфига sing-box/Hiddify — VLESS:**
+**Пример конфига sing-box/Hiddify — VLESS Reality:**
 ```json
 {
   "outbounds": [
     {
       "type": "vless",
-      "tag": "vless-tls",
+      "tag": "vless-reality-443",
       "server": "<IP>",
       "server_port": 443,
       "uuid": "<UUID>",
       "flow": "xtls-rprx-vision",
       "tls": {
         "enabled": true,
-        "insecure": true,
-        "disable_sni": true,
-        "alpn": ["h2", "http/1.1"]
+        "server_name": "www.yandex.ru",
+        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "reality": {
+          "enabled": true,
+          "public_key": "<PUBLIC_KEY из панели>",
+          "short_id": "<SHORT_ID из панели>"
+        }
       },
       "packet_encoding": "xudp"
     }
@@ -577,21 +680,25 @@ https://t.me/proxy?server=<IP>&port=993&secret=<ТВОЙ_СЕКРЕТ>
 }
 ```
 
-**Пример конфига sing-box/Hiddify — Trojan:**
+**Пример конфига sing-box/Hiddify — Trojan Reality:**
 ```json
 {
   "outbounds": [
     {
       "type": "trojan",
-      "tag": "trojan-tcp",
+      "tag": "trojan-reality-2087",
       "server": "<IP>",
-      "server_port": 8443,
+      "server_port": 2087,
       "password": "<PASSWORD>",
       "tls": {
         "enabled": true,
-        "insecure": true,
-        "disable_sni": true,
-        "alpn": ["h2", "http/1.1"]
+        "server_name": "www.yandex.ru",
+        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "reality": {
+          "enabled": true,
+          "public_key": "<PUBLIC_KEY из панели>",
+          "short_id": "<SHORT_ID из панели>"
+        }
       }
     }
   ]
@@ -690,7 +797,7 @@ ssh root@<IP> "echo '<YOUR_PUBLIC_KEY from server_key.pub>' >> /root/.ssh/author
 **5. Применить настройки:**
 
 ```bash
-ssh root@<IP> "sysctl -p /etc/sysctl.d/99-bbr.conf && sshd -t && systemctl daemon-reload && systemctl enable ssh.service && systemctl restart ssh.service && systemctl enable fail2ban && systemctl restart fail2ban && ufw --force reset && ufw default deny incoming && ufw default allow outgoing && ufw allow 59222/tcp comment 'SSH' && ufw allow 2053/tcp comment '3x-ui panel' && ufw allow 443/tcp comment 'VLESS/Trojan TLS' && ufw allow 443/udp comment 'Hysteria2 QUIC' && ufw allow 7391/tcp comment 'h-ui panel' && ufw allow 8443/tcp comment 'Trojan-TCP' && ufw allow 993/tcp comment 'MTProto proxy (Telegram)' && echo y | ufw enable"
+ssh root@<IP> "sysctl -p /etc/sysctl.d/99-bbr.conf && sshd -t && systemctl daemon-reload && systemctl enable ssh.service && systemctl restart ssh.service && systemctl enable fail2ban && systemctl restart fail2ban && ufw --force reset && ufw default deny incoming && ufw default allow outgoing && ufw allow 59222/tcp comment 'SSH' && ufw allow 2053/tcp comment '3x-ui panel' && ufw allow 443/tcp comment 'VLESS Reality (yandex)' && ufw allow 443/udp comment 'Hysteria2 QUIC+Salamander' && ufw allow 7391/tcp comment 'h-ui panel' && ufw allow 2083/tcp comment 'VLESS Reality (yandex)' && ufw allow 2087/tcp comment 'Trojan Reality (yandex)' && ufw allow 993/tcp comment 'MTProto proxy (Telegram)' && echo y | ufw enable"
 ```
 
 **6. 3x-ui:**
@@ -700,7 +807,7 @@ mkdir -p /root/3x-ui/{db,cert}
 scp -P 22 templates/docker-compose.yml root@<IP>:/root/3x-ui/docker-compose.yml
 scp -P 22 templates/secrets/cert.pem root@<IP>:/root/3x-ui/cert/cert.pem
 scp -P 22 templates/secrets/private.key root@<IP>:/root/3x-ui/cert/private.key
-ssh -p 59222 -i creds/server_key root@<IP> "cd /root/3x-ui && docker compose up -d"
+ssh -p 59222 -i creds/<IP>/server_key root@<IP> "cd /root/3x-ui && docker compose up -d"
 # Настроить через БД (шаг 8 из гайда)
 # Создать inbound'ы (шаг 9)
 ```
@@ -709,21 +816,21 @@ ssh -p 59222 -i creds/server_key root@<IP> "cd /root/3x-ui && docker compose up 
 
 ```bash
 # Установить h-ui (шаг 10 из гайда)
-ssh -p 59222 -i creds/server_key root@<IP> "mkdir -p /usr/local/h-ui/ && \
+ssh -p 59222 -i creds/<IP>/server_key root@<IP> "mkdir -p /usr/local/h-ui/ && \
   curl -fsSL https://github.com/jonssonyan/h-ui/releases/latest/download/h-ui-linux-amd64 \
   -o /usr/local/h-ui/h-ui && chmod +x /usr/local/h-ui/h-ui"
-scp -P 59222 -i creds/server_key templates/h-ui.service root@<IP>:/etc/systemd/system/h-ui.service
-ssh -p 59222 -i creds/server_key root@<IP> "systemctl daemon-reload && systemctl enable h-ui && systemctl restart h-ui"
+scp -P 59222 -i creds/<IP>/server_key templates/h-ui.service root@<IP>:/etc/systemd/system/h-ui.service
+ssh -p 59222 -i creds/<IP>/server_key root@<IP> "systemctl daemon-reload && systemctl enable h-ui && systemctl restart h-ui"
 # Настроить HTTPS, Hysteria2 конфиг и пользователей через веб-панель https://<IP>:7391
 ```
 
 **8. MTProto-прокси:**
 
 ```bash
-ssh -p 59222 -i creds/server_key root@<IP> "mkdir -p /etc/mtg"
+ssh -p 59222 -i creds/<IP>/server_key root@<IP> "mkdir -p /etc/mtg"
 scp -P 59222 templates/secrets/mtg-config.toml root@<IP>:/etc/mtg/config.toml
 
-ssh -p 59222 -i creds/server_key root@<IP> \
+ssh -p 59222 -i creds/<IP>/server_key root@<IP> \
   "docker run -d --name mtg --restart always --network host \
    -v /etc/mtg/config.toml:/config.toml \
    nineseconds/mtg:2 run /config.toml"
@@ -736,14 +843,14 @@ ssh -p 59222 -i creds/server_key root@<IP> \
 **Подключение:**
 
 ```bash
-ssh -i creds/server_key -p 59222 root@<IP>
+ssh -i creds/<IP>/server_key -p 59222 root@<IP>
 ```
 
 > **Windows: права на SSH-ключ** — SSH требует, чтобы файл ключа был доступен только владельцу.
 > Выполнить один раз в PowerShell из корня репозитория:
 > ```powershell
 > $acl = $env:USERNAME + ":(R)"
-> icacls "creds\server_key" /inheritance:r /grant:r $acl
+> icacls "creds\<IP>\server_key" /inheritance:r /grant:r $acl
 > ```
 
 **Статус сервисов:**

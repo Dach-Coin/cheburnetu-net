@@ -1,4 +1,4 @@
-# Инструкции для AI-агента: развёртывание VPN-сервера
+﻿# Инструкции для AI-агента: развёртывание VPN-сервера
 
 Этот файл содержит инструкции для AI-ассистента (Claude, ChatGPT, Cursor, Kilo и др.) по развёртыванию VPN-сервера с помощью скрипта `setup.sh`.
 
@@ -6,17 +6,19 @@
 
 В проекте есть готовые Python-скрипты, которые выполняют весь деплой автоматически:
 
+- **`deploy_precheck.py`** — pre-deploy проверка нового VPS: IP/AS, IPv6 egress, доступность Reality target'ов, ru-доменов, скорость канала. **Обязательно** запускать ПЕРЕД deploy_phase1.py — экономит 15 минут на негодном хостере.
 - **`deploy_phase1.py`** — подключается к серверу, загружает `setup.sh`, запускает его с потоковым выводом, скачивает SSH-ключ и credentials в `creds/`
 - **`deploy_verify.py`** — проверяет подключение по ключу на новом порту, статус Docker-контейнеров, портов и UFW
 
-Оба скрипта читают данные сервера из **`deploy_config.ini`** (не коммитится, в `.gitignore`). Шаблон — `deploy_config.example.ini`.
+Все три скрипта читают данные сервера из **`deploy_config.ini`** (не коммитится, в `.gitignore`). Шаблон — `deploy_config.example.ini`.
 
 ### Порядок использования deploy-скриптов:
 
 1. Скопировать `deploy_config.example.ini` → `deploy_config.ini`, заполнить IP/пароль
-2. `python deploy_phase1.py` — полный деплой (5-15 минут)
-3. Установить права на ключ (`icacls` на Windows / `chmod 600` на Linux)
-4. `python deploy_verify.py` — проверка
+2. `python deploy_precheck.py` — sanity-check VPS (~30 сек). Если fatal → менять хостер до deploy.
+3. `python deploy_phase1.py` — полный деплой (5-15 минут)
+4. Установить права на ключ (`icacls` на Windows / `chmod 600` на Linux)
+5. `python deploy_verify.py` — проверка
 
 ### Если нужно делать деплой вручную (без скриптов):
 
@@ -85,7 +87,7 @@ ssh.connect(SERVER_IP, port=22, username='root', password=PASSWORD, timeout=15)
 ```python
 import paramiko, io
 
-key_path = 'creds/server_key'
+key_path = 'creds/<IP>/server_key'
 with open(key_path, 'r') as f:
     key_str = f.read()
 
@@ -151,8 +153,8 @@ exit_code = channel.recv_exit_status()
 
 3. **Файл на сервере** — `/root/vpn_credentials.txt` содержит все данные. Можно скачать через SFTP:
    ```python
-   sftp.get('/root/vpn_credentials.txt', 'creds/credentials.txt')
-   sftp.get('/root/.ssh/id_admin', 'creds/server_key')
+   sftp.get('/root/vpn_credentials.txt', 'creds/<IP>/credentials.txt')
+   sftp.get('/root/.ssh/id_admin', 'creds/<IP>/server_key')
    ```
 
 ## Сохранение ключа и права доступа
@@ -161,14 +163,14 @@ exit_code = channel.recv_exit_status()
 
 ```python
 sftp = ssh.open_sftp()
-sftp.get('/root/.ssh/id_admin', 'creds/server_key')
+sftp.get('/root/.ssh/id_admin', 'creds/<IP>/server_key')
 sftp.close()
 ```
 
 ### Права на файл ключа (Windows):
 
 ```bash
-icacls "creds\server_key" /inheritance:r /grant:r "ИМЯПОЛЬЗОВАТЕЛЯ:(R)"
+icacls "creds\<IP>\server_key" /inheritance:r /grant:r "ИМЯПОЛЬЗОВАТЕЛЯ:(R)"
 ```
 
 Получить имя пользователя:
@@ -184,7 +186,7 @@ username = os.environ.get('USERNAME', os.environ.get('USER', 'user'))
 ### Права на файл ключа (Linux/macOS):
 
 ```bash
-chmod 600 creds/server_key
+chmod 600 creds/<IP>/server_key
 ```
 
 ## Проверка после развёртывания
@@ -207,7 +209,7 @@ print(out.read().decode())
 # Ожидаемый вывод: active + hysteria-linux на 443/UDP
 
 # Проверка портов
-_, out, _ = ssh.exec_command('ss -tlnp | grep -E ":(59222|2053|7391|443|8443|993) "')
+_, out, _ = ssh.exec_command('ss -tlnp | grep -E ":(59222|2053|7391|443|2083|2087|993) "')
 print(out.read().decode())
 ```
 
@@ -279,3 +281,4 @@ creds = creds.replace('IPv6_АДРЕС', 'РЕАЛЬНЫЙ_IPv4')
 - **НЕ** прерывать скрипт во время выполнения — может оставить сервер в несогласованном состоянии
 - **НЕ** запускать `icacls` повторно на тот же файл ключа
 - **НЕ** использовать `ssh.exec_command()` для долгих команд — использовать `channel` с потоковым чтением
+- **НЕ открывать параллельные SSH-сессии к этому серверу** (включая параллельные `Bash` tool calls с `ssh ...` от AI-агента). Активный `sshd-preauth` jail в режиме `aggressive` ловит burst новых соединений (`Connection closed [preauth]` от MaxStartups sshd выглядит для него как DoS) и банит источник на 1–2 часа. Все диагностические команды объединять в **одну** SSH-сессию через `;` / `&&` / heredoc. Если за SSH идёт shared VPN-exit (как у Claude Code на Windows из-под VPN — экзит-нода может быть популярной cloud-IP) — рискуете попасть в чужой бан. Симптомы: `kex_exchange_identification: read: Connection reset by peer` или `Software caused connection abort`. Лечится `fail2ban-client unban <IP>` с другого канала.
