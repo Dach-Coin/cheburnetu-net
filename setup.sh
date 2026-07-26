@@ -158,8 +158,10 @@ EOF
     apt upgrade -y \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold"
+    # logrotate — в облачных образах Ubuntu 24.04 его часто НЕТ (подробности
+    # и последствия — в комментарии к step3b_logrotate).
     apt install -y \
-        ufw fail2ban openssl sqlite3 \
+        ufw fail2ban openssl sqlite3 logrotate \
         unattended-upgrades apt-listchanges curl
 
     ok "Система обновлена, пакеты установлены"
@@ -246,6 +248,96 @@ Unattended-Upgrade::Automatic-Reboot "false";
 EOF
 
     ok "Автообновления настроены"
+}
+
+# ===================== ШАГ 3b: Ротация логов ================================
+# Облачные образы Ubuntu 24.04 у ряда хостеров идут БЕЗ пакета logrotate, при
+# этом конфиги /etc/logrotate.d/{rsyslog,ufw} на месте — их кладут сами пакеты
+# rsyslog и ufw. Выглядит как «ротация настроена», но исполнять эти конфиги
+# некому: ни бинарника, ни logrotate.timer в системе нет. Логи растут вечно.
+#
+# Порядок величин: за ~80 дней аптайма набегает syslog ~170 MB + kern.log
+# ~90 MB + ufw.log ~80 MB + journal ~410 MB, итого около 765 MB в /var/log —
+# на типовом VPS-диске это заметная доля. Основной поставщик строк — UFW BLOCK
+# от сканеров, которые долбятся круглосуточно; journal при этом дублирует
+# то же самое третьим экземпляром.
+#
+# Ставим пакет, включаем таймер, задаём хранение 30 дней:
+#   - logrotate: daily + rotate 30 + maxage 30. Именно maxage режет по
+#     ВОЗРАСТУ, а не только по счётчику файлов — без него редко пишущий лог
+#     мог бы храниться годами;
+#   - journald: MaxRetentionSec=1month + потолок SystemMaxUse=300M. Дефолт у
+#     journald — 10% раздела (на типовом VPS-диске 20 GB это около 2 GB),
+#     т.е. он разрастается молча и logrotate им не управляет вообще,
+#     у него свои лимиты.
+# Стабильный размер /var/log после этого — порядка 200 MB.
+step3b_logrotate() {
+    info "Шаг 3b/12: Ротация логов (logrotate + journald, хранение 30 дней)"
+
+    # Идемпотентно: в step1 пакет уже ставился, но если тот apt отвалился по
+    # сети — доустановим здесь, шаг не должен молча настроить пустоту.
+    command -v logrotate >/dev/null 2>&1 || apt install -y logrotate
+
+    cat > /etc/logrotate.d/rsyslog << 'EOF'
+/var/log/syslog
+/var/log/mail.log
+/var/log/kern.log
+/var/log/auth.log
+/var/log/user.log
+/var/log/cron.log
+{
+	daily
+	rotate 30
+	maxage 30
+	missingok
+	notifempty
+	compress
+	delaycompress
+	sharedscripts
+	postrotate
+		/usr/lib/rsyslog/rsyslog-rotate
+	endscript
+}
+EOF
+
+    cat > /etc/logrotate.d/ufw << 'EOF'
+/var/log/ufw.log
+{
+	daily
+	rotate 30
+	maxage 30
+	missingok
+	notifempty
+	compress
+	delaycompress
+	sharedscripts
+	postrotate
+		[ -x /usr/lib/rsyslog/rsyslog-rotate ] && /usr/lib/rsyslog/rsyslog-rotate || true
+	endscript
+}
+EOF
+
+    # journald живёт отдельно от logrotate — лимиты только через свой конфиг.
+    # Сначала вычищаем возможные прежние значения (в т.ч. закомментированные
+    # дефолты), потом дописываем свои — иначе получим дубли ключей.
+    sed -i '/^\s*#\?\s*\(MaxRetentionSec\|SystemMaxUse\|SystemMaxFileSize\)=/d' \
+        /etc/systemd/journald.conf
+    cat >> /etc/systemd/journald.conf << 'EOF'
+MaxRetentionSec=1month
+SystemMaxUse=300M
+SystemMaxFileSize=50M
+EOF
+    systemctl restart systemd-journald
+
+    systemctl enable --now logrotate.timer >/dev/null 2>&1 \
+        || warn "logrotate.timer не включился — проверь: systemctl status logrotate.timer"
+
+    # Первый прогон создаёт /var/lib/logrotate/status. Без него logrotate при
+    # следующем запуске считает все логи впервые увиденными и откладывает
+    # первую ротацию ещё на сутки.
+    logrotate /etc/logrotate.conf || warn "первый прогон logrotate завершился с ошибкой"
+
+    ok "Логи: rsyslog/ufw — daily, 30 дней; journal — ≤1 месяц и ≤300 MB"
 }
 
 # ===================== ШАГ 4: SSH hardening ==================================
@@ -1134,6 +1226,7 @@ main() {
     step1b_swap
     step2_bbr
     step3_autoupdate
+    step3b_logrotate
     step4_ssh
     step5_ufw
     step5b_scanner_blocklist

@@ -114,6 +114,7 @@ ssh -i creds/<IP>/server_key -p 59222 root@<IP_СЕРВЕРА>
 1. Обновление системы и установка пакетов
 2. Включение BBR (ускорение TCP)
 3. Настройка автообновлений безопасности
+3b. Ротация логов — установка `logrotate` (в облачных образах Ubuntu его нет), хранение логов 30 дней, лимиты journald
 4. SSH hardening — смена порта, ключ ED25519, отключение пароля
 5. Настройка UFW (файрвол)
 6. Настройка fail2ban (защита от брутфорса)
@@ -134,8 +135,8 @@ ssh -i creds/<IP>/server_key -p 59222 root@<IP_СЕРВЕРА>
 SSH_PORT=59222          # Порт SSH
 PANEL_PORT=2053         # Порт веб-панели 3x-ui
 HUI_PORT=7391           # Порт веб-панели h-ui (Hysteria2)
-XUI_VERSION="2.8.11"      # Образ панели 3x-ui (Xray внутри обновляется отдельно)
-XRAY_VERSION="26.3.27"    # Версия Xray для замены бинарника в контейнере
+XUI_VERSION="2.9.4"       # Образ панели 3x-ui (Xray идёт внутри образа)
+XRAY_VERSION="26.3.27"    # Версия Xray для ручной подмены — с 2.9.x не нужна, шаг 9a опционален
 REALITY_SNI="www.yandex.ru"   # Reality SNI/dest (target должен быть доступен с сервера)
 REALITY_TARGET="www.yandex.ru:443"
 HY2_MASQUERADE_URL="https://www.bing.com"  # маскировочный URL Hysteria2
@@ -162,7 +163,10 @@ HY2_USER2="User2"         # Имя пользователя Hysteria2
 │   ├── mtg-config.toml
 │   ├── 99-bbr.conf
 │   ├── 20auto-upgrades
-│   └── 50unattended-upgrades
+│   ├── 50unattended-upgrades
+│   ├── logrotate-rsyslog          — Ротация syslog/kern.log/auth.log (30 дней)
+│   ├── logrotate-ufw              — Ротация ufw.log (30 дней)
+│   └── journald.conf              — Лимиты journal: 1 месяц / 300 MB
 └── creds/                        — Ваши данные доступа (в .gitignore)
     └── <IP>/                     — Подпапка на каждый сервер (имя = IP)
         ├── server_key
@@ -179,6 +183,8 @@ HY2_USER2="User2"         # Имя пользователя Hysteria2
 **sshd -t требует /run/sshd.** На свежей Ubuntu 24.04 каталог `/run/sshd` не создан. Команда `sshd -t` (проверка конфига) падает с ошибкой "Missing privilege separation directory". Решение — `mkdir -p /run/sshd` перед проверкой.
 
 **Определение IP на dual-stack серверах.** Команды `curl ifconfig.me` и `hostname -I` могут вернуть IPv6-адрес вместо IPv4. Решение — `curl -4` или `ip -4 addr show scope global`.
+
+**logrotate отсутствует в облачных образах — логи растут бесконечно.** Ловушка в том, что выглядит всё настроенным: файлы `/etc/logrotate.d/rsyslog` и `/etc/logrotate.d/ufw` на месте (их кладут сами пакеты `rsyslog` и `ufw`), но самого пакета `logrotate` в образе нет — ни бинарника, ни `logrotate.timer`. Исполнять конфиги некому. Порядок величин: за ~80 дней аптайма в `/var/log` набегает около 765 MB (journal ~410 MB, syslog ~170 MB, kern.log ~90 MB, ufw.log ~80 MB) — основной поставщик строк это `UFW BLOCK` от круглосуточных сканеров. Отдельно: journald **не управляется** logrotate, его дефолтный лимит — 10% раздела, т.е. пара гигабайт на типовом VPS-диске. Решение — `setup.sh` (step3b) ставит пакет, включает таймер и задаёт хранение 30 дней для обоих механизмов. Быстрая проверка на уже развёрнутом сервере: `which logrotate` и `systemctl list-timers logrotate.timer`.
 
 **Xray 26.x: agressive idle-teardown рубит push-уведомления.** Дефолты Xray 26.x для `policy.levels.0` (`connIdle=300`, `uplinkOnly=2`, `downlinkOnly=5`) закрывают TCP-сессию через 5 секунд тишины с одной стороны. Это убивает long-lived push-стримы (Telegram, WhatsApp, MQTT): клиент держит тихое соединение, ждёт push, а Xray его рубит → при заблокированном экране уведомления не приходят. Решение — `setup.sh` (step9c) явно прописывает `connIdle=1800, uplinkOnly=0, downlinkOnly=0` в шаблон, чтобы push-сессии переживали idle.
 

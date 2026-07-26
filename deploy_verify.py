@@ -67,5 +67,16 @@ print("[4] UFW status:")
 _, out, _ = ssh.exec_command('ufw status')
 print(out.read().decode('utf-8', errors='replace'))
 
+# Check log rotation — cloud Ubuntu images often ship without logrotate,
+# which lets /var/log grow unbounded (see README, "Known Ubuntu 24.04 quirks")
+print("[5] Log rotation:")
+_, out, _ = ssh.exec_command(
+    'printf "  logrotate: %s\\n" "$(command -v logrotate || echo MISSING)"; '
+    'printf "  timer:     %s\\n" "$(systemctl is-enabled logrotate.timer 2>&1)"; '
+    'printf "  /var/log:  %s\\n" "$(du -sh /var/log 2>/dev/null | cut -f1)"; '
+    'journalctl --disk-usage 2>/dev/null | sed "s/^/  journal:   /"'
+)
+print(out.read().decode('utf-8', errors='replace'))
+
 ssh.close()
 print("[DONE] All checks passed!")

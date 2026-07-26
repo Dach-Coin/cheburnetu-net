@@ -1,0 +1,22 @@
+# Кладётся в /etc/logrotate.d/rsyslog
+# Хранение — 30 дней. maxage режет по возрасту файла, rotate — по количеству;
+# нужны оба, иначе редко пишущий лог переживёт срок хранения.
+/var/log/syslog
+/var/log/mail.log
+/var/log/kern.log
+/var/log/auth.log
+/var/log/user.log
+/var/log/cron.log
+{
+	daily
+	rotate 30
+	maxage 30
+	missingok
+	notifempty
+	compress
+	delaycompress
+	sharedscripts
+	postrotate
+		/usr/lib/rsyslog/rsyslog-rotate
+	endscript
+}

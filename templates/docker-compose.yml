@@ -1,6 +1,12 @@
+# Шаблон для РУЧНОЙ установки. setup.sh этот файл не читает — он генерирует
+# docker-compose.yml на сервере сам, подставляя XUI_VERSION (см. step7_docker_xui).
+# Версию образа держать в согласии с XUI_VERSION в setup.sh.
+#
+# Ручная подмена Xray-бинарника через docker cp больше НЕ нужна: начиная с
+# 3x-ui 2.9.x встроенный в образ Xray свежее того, что подкладывали руками.
 services:
   3x-ui:
-    image: ghcr.io/mhsanaei/3x-ui:2.8.11
+    image: ghcr.io/mhsanaei/3x-ui:2.9.4
     container_name: 3x-ui
     hostname: vpn-server
     volumes:

@@ -154,6 +154,115 @@ EOF
 
 ---
 
+### 3b. Настроить ротацию логов (logrotate + journald)
+
+⚠️ **Облачные образы Ubuntu 24.04 часто идут БЕЗ пакета `logrotate`.** При этом конфиги `/etc/logrotate.d/rsyslog` и `/etc/logrotate.d/ufw` на месте — их кладут сами пакеты `rsyslog` и `ufw`. Выглядит как «ротация настроена», но исполнять их некому: ни бинарника, ни `logrotate.timer` в системе нет, и логи растут бесконечно.
+
+Порядок величин — за ~80 дней аптайма в `/var/log` набегает около 765 MB:
+
+| Файл | Размер |
+|------|--------|
+| journal | ~410 MB |
+| syslog | ~170 MB |
+| kern.log | ~90 MB |
+| ufw.log | ~80 MB |
+
+Основной поставщик строк — `UFW BLOCK` от сканеров, которые долбятся круглосуточно; journal дублирует то же самое третьим экземпляром.
+
+```bash
+# Проверить, есть ли logrotate вообще
+which logrotate || echo "НЕ УСТАНОВЛЕН"
+systemctl list-timers logrotate.timer   # "0 timers listed" = юнита нет
+
+# Установить
+apt install -y logrotate
+
+# Ротация rsyslog-логов: каждый день, хранить 30 дней
+cat > /etc/logrotate.d/rsyslog << 'EOF'
+/var/log/syslog
+/var/log/mail.log
+/var/log/kern.log
+/var/log/auth.log
+/var/log/user.log
+/var/log/cron.log
+{
+	daily
+	rotate 30
+	maxage 30
+	missingok
+	notifempty
+	compress
+	delaycompress
+	sharedscripts
+	postrotate
+		/usr/lib/rsyslog/rsyslog-rotate
+	endscript
+}
+EOF
+
+# Ротация ufw.log — самый быстрорастущий лог на VPN-сервере
+cat > /etc/logrotate.d/ufw << 'EOF'
+/var/log/ufw.log
+{
+	daily
+	rotate 30
+	maxage 30
+	missingok
+	notifempty
+	compress
+	delaycompress
+	sharedscripts
+	postrotate
+		[ -x /usr/lib/rsyslog/rsyslog-rotate ] && /usr/lib/rsyslog/rsyslog-rotate || true
+	endscript
+}
+EOF
+
+# journald управляется отдельно — logrotate его не трогает
+sed -i '/^\s*#\?\s*\(MaxRetentionSec\|SystemMaxUse\|SystemMaxFileSize\)=/d' /etc/systemd/journald.conf
+cat >> /etc/systemd/journald.conf << 'EOF'
+MaxRetentionSec=1month
+SystemMaxUse=300M
+SystemMaxFileSize=50M
+EOF
+systemctl restart systemd-journald
+
+# Включить таймер (ежедневно в 00:00) и сделать первый прогон
+systemctl enable --now logrotate.timer
+logrotate /etc/logrotate.conf
+```
+
+**Почему именно так:**
+- `maxage 30` режет по **возрасту** файла, `rotate 30` — по количеству. Нужны оба: без `maxage` редко пишущий лог переживёт срок хранения.
+- journald **не управляется** logrotate, у него свои лимиты. Дефолт `SystemMaxUse` — 10% раздела (на типовом VPS-диске 20 GB это около 2 GB), поэтому journal разрастается молча.
+
+**Проверка:**
+```bash
+systemctl is-enabled logrotate.timer          # enabled
+systemctl list-timers logrotate.timer         # NEXT: завтра 00:00
+logrotate -d /etc/logrotate.conf 2>&1 | grep -i error   # пусто = синтаксис ок
+journalctl --disk-usage                       # должно быть в пределах 300M
+
+# Убедиться, что после рестарта journald логи всё ещё пишутся в оба места
+logger -t test "проверка"
+tail -1 /var/log/syslog && journalctl -t test -n1
+```
+
+**Разовая чистка, если логи уже разрослись:**
+```bash
+journalctl --vacuum-time=1month               # или --vacuum-size=200M
+# Усечь текущие файлы, сохранив последние строки (inode не меняется —
+# rsyslog не теряет дескриптор):
+for f in /var/log/syslog /var/log/kern.log /var/log/ufw.log; do
+    tail -n 20000 "$f" > /tmp/.lt && cat /tmp/.lt > "$f" && rm -f /tmp/.lt
+done
+systemctl kill -s HUP rsyslog
+```
+
+Стабильный размер `/var/log` после настройки — порядка 200 MB.
+
+---
+
 ### 4. Настроить SSH (порт + ключ + hardening)
 
 ```bash
@@ -324,7 +433,7 @@ version: "3"
 
 services:
   3x-ui:
-    image: ghcr.io/mhsanaei/3x-ui:2.8.11
+    image: ghcr.io/mhsanaei/3x-ui:2.9.4
     container_name: 3x-ui
     hostname: yourhostname
     volumes:
@@ -384,9 +493,11 @@ sqlite3 /root/3x-ui/db/x-ui.db "SELECT value FROM settings WHERE key='webBasePat
 
 ### 9. Обновить Xray-ядро и создать Reality inbound'ы
 
-#### 9a. Замена Xray-бинарника на свежий
+#### 9a. Замена Xray-бинарника на свежий (опционально)
 
-Образ `3x-ui:2.8.11` содержит Xray ~26.2.6, в котором uTLS-фингерпринт отстаёт от актуального Chrome. Подменяем бинарник:
+⚠️ **Начиная с 3x-ui 2.9.x этот шаг обычно НЕ нужен** — Xray внутри образа свежее того, что подкладывали руками (образ 2.9.4 идёт с Xray 26.4.25). Шаг оставлен на случай, когда нужно зафиксировать конкретную версию ядра или откатиться на старую. Если версия из образа устраивает — сразу к 9b.
+
+Подмена бинарника:
 
 ```bash
 XRAY_VER="26.3.27"
